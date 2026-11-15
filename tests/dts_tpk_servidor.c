@@ -5,7 +5,11 @@
 //
 //   dts_tpk_servidor <port> padrao <dir>   HLS: 2 s segments, 1 s prebuffer
 //   dts_tpk_servidor <port> cancelar|fila|escuta|faixa <dir>   review blockers
+//   dts_tpk_servidor <port> sovideo <dir>  video only (audio from another source)
+//   dts_tpk_servidor <port> doador <dir>   the donor server (doador_tpk.c) over it
 #include "../src/dts/dts_hls_tpk.h"
+#include "../src/dts/dts_remux.h"
+#include "../src/dts/doador_tpk.h"
 #include <libavformat/avformat.h>
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -144,6 +148,247 @@ static void testeHls(int origem, const char *dir) {
   sleep(1);   // the session is destroyed on its own thread
 }
 
+// VIDEO ONLY (audio from another source, doador_tpk.c): the same playlist and
+// segments, no audio stream, whatever audio the file has (DTS in fx.mkv, AAC
+// only in aac.mkv: no DTS needed). The shell checks the segments with ffprobe.
+static void testeSoVideo(int origem, const char *dir) {
+  static const char *const ARQ[2] = { "fx.mkv", "aac.mkv" };
+  for (int a = 0; a < 2; a++) {
+    char fonte[200], url[300], pref[64], c[128], nome[64];
+    int porta;
+    Resp r;
+    snprintf(fonte, sizeof fonte, "http://127.0.0.1:%d/%s", origem, ARQ[a]);
+    CONFERE(dts_tpk_abrir(fonte, "", DTS_REMUX_NO_AUDIO, 0, DTSTPK_HLS, 0, url, sizeof url) && partes(url, &porta, pref, sizeof pref),
+            "video only: session opens on %s", ARQ[a]);
+    snprintf(c, sizeof c, "%sv.m3u8", pref);
+    CONFERE(!pedir(porta, c, NULL, &r) && r.status == 200 && strstr((char *)r.corpo, "seg0.ts"), "video only: media playlist on %s", ARQ[a]);
+    free(r.corpo);
+    for (int k = 0; k < 4; k += 3) {
+      snprintf(c, sizeof c, "%sseg%d.ts", pref, k);
+      snprintf(nome, sizeof nome, "sv%d_seg%d.ts", a, k);
+      CONFERE(!pedir(porta, c, NULL, &r) && r.status == 200 && r.n > 1000 && salvar(dir, nome, &r), "video only: %s seg%d 200 (%zu B)",
+              ARQ[a], k, r.n);
+      free(r.corpo);
+    }
+    CONFERE(dts_tpk_estado() == DTSTPK_PRONTO, "video only: %s ready, path \"%s\"", ARQ[a], dts_tpk_caminho());
+    dts_tpk_fechar();
+    sleep(1);
+  }
+}
+
+// AUDIO FROM ANOTHER SOURCE (doador_tpk.c): the converter's video only + the
+// file's own track + a donor's two, as the TV would ask for them. The donor
+// (doador.mkv) is 1.5 s longer at the start; its Polish E-AC3 track is silent
+// but for a beep at 10.5 s of its own time (= 9.0 s of fx.mkv's). The shell
+// checks codecs, timestamps and where the beep lands in what is saved here.
+static int salvarPedido(int porta, const char *pref, const char *nome, const char *dir, const char *arq) {
+  char c[160];
+  Resp r;
+  int ok;
+  snprintf(c, sizeof c, "%s%s", pref, nome);
+  ok = !pedir(porta, c, NULL, &r) && r.status == 200 && r.n > 0 && salvar(dir, arq, &r);
+  free(r.corpo);
+  return ok;
+}
+// Opens a session, waits for the master (the preparation), and says the
+// track it starts on.
+static int doaComeca(const DoaAbrir *o, char *url, size_t n) {
+  int porta;
+  char pref[64], c[200];
+  Resp r;
+  if (!doa_abrir(o, url, n) || !partes(url, &porta, pref, sizeof pref)) return -2;
+  snprintf(c, sizeof c, "%smaster.m3u8", pref);
+  if (pedir(porta, c, NULL, &r)) return -2;
+  free(r.corpo);
+  return doa_audio();
+}
+static void testeDoador(int origem, const char *dir) {
+  char fonte[200], doador[200], conv[300], url[300], pref[64], c[200], nome[40];
+  int porta, iD = -1, iF = -1, iE = -1, n, i;
+  Resp r;
+  DoaAbrir o;
+  DoaRendicao rd[8];
+  snprintf(fonte, sizeof fonte, "http://127.0.0.1:%d/fx.mkv", origem);
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/doador.mkv", origem);
+  CONFERE(doa_disponivel(), "donor: server available in this build");
+  CONFERE(dts_tpk_abrir(fonte, "", DTS_REMUX_NO_AUDIO, 0, DTSTPK_HLS, 0, conv, sizeof conv), "donor: the converter opens video only");
+  memset(&o, 0, sizeof o);
+  o.video = conv; o.orig = fonte; o.cab = ""; o.audio = 0;
+  o.doador = doador; o.doador_cab = ""; o.doador_nome = "Test donor"; o.doador_lingua = "pol"; o.doador_padrao = 1;
+  o.doador_ms = -1500;
+  CONFERE(doa_abrir(&o, url, sizeof url) && partes(url, &porta, pref, sizeof pref), "donor: session opens");
+  snprintf(c, sizeof c, "%smaster.m3u8", pref);
+  CONFERE(!pedir(porta, c, NULL, &r) && r.status == 200 && salvar(dir, "dm.m3u8", &r), "donor: master 200");
+  free(r.corpo);
+  n = doa_rendicoes(rd, 8);
+  for (i = 0; i < n; i++) {
+    if (rd[i].chave == DOA_DOADOR(0)) iD = i;
+    if (rd[i].chave == DOA_DOADOR(1)) iE = i;
+    if (rd[i].chave == 0) iF = i;
+  }
+  CONFERE(n == 3 && iF == 0 && iD == 1 && iE == 2, "donor: 3 renditions, the file's then the donor's (%d: file %d, donor %d and %d)", n, iF, iD, iE);
+  CONFERE(doa_audio() == DOA_DOADOR(0) && doa_estado(NULL, 0) == 1, "donor: it leads, in the asked language (Polish)");
+  CONFERE(!strcmp(rd[iF].codec, "ac3") && rd[iF].canais == 6 && !strcmp(rd[iD].codec, "eac3") && !strcmp(rd[iE].codec, "aac"),
+          "donor: the file's DTS goes as AC3 5.1, the donor's E-AC3 and AAC as they are");
+  { char don4[32], don4b[32];
+    snprintf(nome, sizeof nome, "a%d_4.ts", iD); snprintf(don4, sizeof don4, "%s", nome);
+    CONFERE(salvarPedido(porta, pref, nome, dir, "d4.ts"), "donor: segment 4");
+    snprintf(nome, sizeof nome, "a%d_3.ts", iF);
+    CONFERE(salvarPedido(porta, pref, nome, dir, "f3.ts"), "donor: the file's own track, segment 3");
+    snprintf(don4b, sizeof don4b, "%s", don4);
+    CONFERE(salvarPedido(porta, pref, don4b, dir, "d4b.ts"), "donor: segment 4 again (back on the donor)");
+    doa_desloc(-1000);
+    CONFERE(doa_desloc_ms() == -1000, "donor: offset set to -1000 ms");
+    CONFERE(salvarPedido(porta, pref, don4, dir, "d4c.ts"), "donor: segment 4 with the new offset"); }
+  snprintf(nome, sizeof nome, "a%d_12.ts", iD);
+  CONFERE(salvarPedido(porta, pref, nome, dir, "d12.ts"), "donor: seek ahead (segment 12)");
+  snprintf(nome, sizeof nome, "a%d_1.ts", iD);
+  CONFERE(salvarPedido(porta, pref, nome, dir, "d1.ts"), "donor: seek back (segment 1)");
+  // The video named by the master: the converter's own segments, straight.
+  { char *v = NULL, vpref[64];
+    int vporta;
+    snprintf(c, sizeof c, "%smaster.m3u8", pref);
+    if (!pedir(porta, c, NULL, &r) && r.corpo) v = strstr((char *)r.corpo, "\nhttp://127.0.0.1:");
+    CONFERE(v && partes(v + 1, &vporta, vpref, sizeof vpref) && strstr(v, "/v.m3u8"), "donor: the master's video is the converter's media playlist");
+    if (v && partes(v + 1, &vporta, vpref, sizeof vpref))
+      CONFERE(salvarPedido(vporta, vpref, "seg3.ts", dir, "v3.ts"), "donor: the converter's segment 3");
+    free(r.corpo); }
+  // A player on the master: the converter's video + the donor's audio.
+  snprintf(c, sizeof c, "timeout 120 ffmpeg -v error -y -i '%s' -map 0:v:0 -map 0:a:%d -t 8 -c copy '%s/dplay.ts'", url, iD, dir);
+  CONFERE(system(c) == 0, "donor: a player reads the master (video + the donor's audio)");
+  doa_log();
+  doa_fechar();
+  // A donor that does not open: the file's own track goes on.
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/nothere.mkv", origem);
+  o.doador = doador;
+  CONFERE(doa_abrir(&o, url, sizeof url) && partes(url, &porta, pref, sizeof pref), "donor missing: session opens");
+  snprintf(c, sizeof c, "%smaster.m3u8", pref);
+  CONFERE(!pedir(porta, c, NULL, &r) && r.status == 200 && salvar(dir, "dx.m3u8", &r), "donor missing: master 200");
+  free(r.corpo);
+  { char m[160];
+    CONFERE(doa_estado(m, sizeof m) == -1 && doa_rendicoes(NULL, 8) == 1 && doa_audio() == 0,
+            "donor missing: reported (%s), the file's track plays", m); }
+  doa_fechar();
+  // The track the session starts on: by hand, the series memory, the languages.
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/doador.mkv", origem);
+  o.doador = doador; o.doador_lingua = "fre,eng";
+  CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(1), "donor: the language list in order (fre absent, eng: its AAC)");
+  o.doador_faixa = 1 + 1;   // stream 1: the E-AC3, picked by hand
+  CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(0), "donor: the track picked by hand wins over the languages");
+  { int corte = 99, vel = 9, ppm = 9;
+    CONFERE(doa_diferenca(&corte, &vel, &ppm) && corte == 2 && !vel && !ppm,
+            "donor: against the file 1.5 s longer, same frame rate (cut %d s, speed %d, %d ppm)", corte, vel, ppm); }
+  o.doador_faixa = 0; o.doador_lingua = "pol";
+  o.dica_lingua = "eng"; o.dica_codec = "aac"; o.dica_canais = 2; o.dica_titulo = "";
+  CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(1), "donor: the series memory's track wins over the languages");
+  o.dica_lingua = o.dica_codec = o.dica_titulo = NULL; o.dica_canais = 0;
+  // A donor far shorter than the file: not this title, the file's own track.
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/aac.mkv", origem);
+  { char m[200];
+    CONFERE(doaComeca(&o, url, sizeof url) == 0 && doa_estado(m, sizeof m) == -1 && strstr(m, "lasts 12 s"),
+            "donor: 12 s against 30 s refused (%s)", m); }
+  doa_fechar();
+  // A PAL donor (25 fps, 4.2 % faster): at its speed, asked and by itself.
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/pal.mkv", origem);
+  o.doador = doador; o.doador_ms = 0; o.doador_ppm = 41667; o.doador_lingua = "pol";
+  { int pt;
+    char pp[64];
+    CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(0) && partes(url, &pt, pp, sizeof pp), "PAL donor: session at +41667 ppm");
+    n = doa_rendicoes(rd, 8);
+    for (i = 0, iD = -1; i < n; i++) if (rd[i].chave == DOA_DOADOR(0)) iD = i;
+    CONFERE(iD >= 0 && !strcmp(rd[iD].codec, "ac3"), "PAL donor: its E-AC3 offered as AC3 (converted at its speed)");
+    snprintf(nome, sizeof nome, "a%d_4.ts", iD);
+    CONFERE(salvarPedido(pt, pp, nome, dir, "p4.ts"), "PAL donor: segment 4");
+    snprintf(nome, sizeof nome, "a%d_10.ts", iD);
+    CONFERE(salvarPedido(pt, pp, nome, dir, "p10.ts"), "PAL donor: segment 10"); }
+  o.doador_ppm = 0;
+  { int pt, corte = 0, vel = 0, ppm = 0;
+    char pp[64];
+    CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(0) && partes(url, &pt, pp, sizeof pp), "PAL donor: session, no speed asked");
+    CONFERE(doa_diferenca(&corte, &vel, &ppm) && vel && ppm > 41600 && ppm < 41700 && abs(corte) <= 1,
+            "PAL donor: the frame rates and lengths name 25/24 (speed %d, %d ppm, cut %d s)", vel, ppm, corte);
+    for (i = 0, iD = -1, n = doa_rendicoes(rd, 8); i < n; i++) if (rd[i].chave == DOA_DOADOR(0)) iD = i;
+    snprintf(nome, sizeof nome, "a%d_4.ts", iD);
+    CONFERE(iD >= 0 && salvarPedido(pt, pp, nome, dir, "p4a.ts"), "PAL donor: segment 4 at the speed it took"); }
+  doa_fechar();
+  // The audio menu's track list of another version.
+  { DoaSonda t[8];
+    snprintf(doador, sizeof doador, "http://127.0.0.1:%d/doador.mkv", origem);
+    n = doa_sondar(doador, "", t, 8);
+    CONFERE(n == 2 && t[0].si == 1 && !strcmp(t[0].codec, "eac3") && t[0].canais == 6 && !strcmp(t[0].lingua, "pol") &&
+            t[1].si == 2 && !strcmp(t[1].codec, "aac") && !strcmp(t[1].lingua, "eng"),
+            "donor: its tracks for the menu (%d: stream %d %s, stream %d %s)", n, n > 0 ? t[0].si : -1, n > 0 ? t[0].codec : "",
+            n > 1 ? t[1].si : -1, n > 1 ? t[1].codec : "");
+    snprintf(doador, sizeof doador, "http://127.0.0.1:%d/aac.mkv", origem);
+    CONFERE(doa_sondar(doador, "", t, 8) == -3, "donor: a 12 s file is the debrid's placeholder clip for the menu");
+    snprintf(doador, sizeof doador, "http://127.0.0.1:%d/nothere.mkv", origem);
+    CONFERE(doa_sondar(doador, "", t, 8) == -1, "donor: a file that does not open"); }
+  dts_tpk_fechar();
+  sleep(1);
+}
+
+// THE AUTOMATIC MATCH: m.mkv's DTS against md.mkv's AC3 (the same audio 3 s
+// later). Opened 1 s off (-2000 ms); the converter's segments and the donor's
+// are asked like a player would, which fills the two captures.
+static void testeDopasuj(int origem, const char *dir) {
+  char fonte[200], doador[200], conv[300], url[300], pref[64], c[200], nome[40], vpref[64];
+  int porta, vporta, i, iD = -1, n, r = 0, au = -1;
+  DoaAbrir o;
+  DoaRendicao rd[8];
+  DoaDopasuj res;
+  Resp rp;
+  char *v = NULL;
+  snprintf(fonte, sizeof fonte, "http://127.0.0.1:%d/m.mkv", origem);
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/md.mkv", origem);
+  CONFERE(dts_tpk_abrir(fonte, "", DTS_REMUX_NO_AUDIO, 0, DTSTPK_HLS, 0, conv, sizeof conv), "match: the converter opens video only");
+  memset(&o, 0, sizeof o);
+  o.video = conv; o.orig = fonte; o.cab = ""; o.doador = doador; o.doador_cab = ""; o.doador_nome = "Match donor";
+  o.doador_lingua = "eng"; o.doador_padrao = 1; o.doador_ms = -2000; o.seguir = 1;
+  CONFERE(doa_abrir(&o, url, sizeof url) && partes(url, &porta, pref, sizeof pref), "match: session opens");
+  snprintf(c, sizeof c, "%smaster.m3u8", pref);
+  CONFERE(!pedir(porta, c, NULL, &rp) && rp.status == 200, "match: master 200");
+  if (rp.corpo) v = strstr((char *)rp.corpo, "\nhttp://127.0.0.1:");
+  CONFERE(v && partes(v + 1, &vporta, vpref, sizeof vpref), "match: the converter's playlist in the master");
+  free(rp.corpo);
+  n = doa_rendicoes(rd, 8);
+  for (i = 0; i < n; i++) if (rd[i].chave == DOA_DOADOR(0)) iD = i;
+  CONFERE(iD >= 0 && doa_audio() == DOA_DOADOR(0), "match: the donor's AC3 plays");
+  doa_dopasuj(0);
+  CONFERE(doa_dopasuj_ativo(), "match: capturing");
+  for (i = 0; i < 40 && !(r = doa_dopasuj_resultado(&res, &au)); i++) {
+    snprintf(nome, sizeof nome, "seg%d.ts", i);
+    salvarPedido(vporta, vpref, nome, dir, "v.ts");
+    snprintf(nome, sizeof nome, "a%d_%d.ts", iD, i);
+    salvarPedido(porta, pref, nome, dir, "a.ts");
+  }
+  for (i = 0; i < 300 && !r; i++) { usleep(100000); r = doa_dopasuj_resultado(&res, &au); }
+  CONFERE(r == 1 && res.ms > -3060 && res.ms < -2940 && res.ppm == 0 && res.como == 1 && au == 0,
+          "match: found near, offset %d ms (right: -3000), speed %d ppm, how %d", r == 1 ? res.ms : 0, res.ppm, res.como);
+  CONFERE(!doa_dopasuj_ativo(), "match: done");
+  // 22 s off: not near; the donor read on its own, +-60 s.
+  o.doador_ms = -25000;
+  CONFERE(doa_abrir(&o, url, sizeof url) && partes(url, &porta, pref, sizeof pref), "match: session 22 s off");
+  snprintf(c, sizeof c, "%smaster.m3u8", pref);
+  CONFERE(!pedir(porta, c, NULL, &rp) && rp.status == 200, "match: master 200 again");
+  free(rp.corpo);
+  doa_dopasuj(1);
+  r = 0;
+  for (i = 0; i < 40 && !(r = doa_dopasuj_resultado(&res, &au)); i++) {
+    snprintf(nome, sizeof nome, "seg%d.ts", i);
+    salvarPedido(vporta, vpref, nome, dir, "v.ts");
+    snprintf(nome, sizeof nome, "a%d_%d.ts", iD, i);
+    salvarPedido(porta, pref, nome, dir, "a.ts");
+  }
+  for (i = 0; i < 600 && !r; i++) { usleep(100000); r = doa_dopasuj_resultado(&res, &au); }
+  CONFERE(r == 1 && res.ms > -3060 && res.ms < -2940 && res.como == 3 && au == 1,
+          "match: found by the +-60 s search, offset %d ms, how %d, by itself %d", r == 1 ? res.ms : 0, res.como, au);
+  doa_dopasuj(0);
+  CONFERE(doa_dopasuj_ativo(), "match: a second request runs");
+  doa_fechar();
+  CONFERE(1, "match: closed while capturing (the tap and the job let go)");
+  dts_tpk_fechar();
+  sleep(1);
+}
 static double agora(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -356,6 +601,9 @@ int main(int argc, char **argv) {
   else if (!strcmp(t, "fila")) testeFila(origem);
   else if (!strcmp(t, "escuta")) testeEscuta(origem);
   else if (!strcmp(t, "faixa")) testeFaixa(origem);
+  else if (!strcmp(t, "sovideo")) testeSoVideo(origem, argv[3]);
+  else if (!strcmp(t, "doador")) testeDoador(origem, argv[3]);
+  else if (!strcmp(t, "dopasuj")) testeDopasuj(origem, argv[3]);
   else { fprintf(stderr, "unknown test %s\n", t); return 2; }
   printf("%s: %d failure(s)\n", t, falhas);
   return falhas ? 1 : 0;
