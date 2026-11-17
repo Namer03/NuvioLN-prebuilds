@@ -63,6 +63,9 @@ typedef struct {
    * audio segment). 0 = as proven on the S95C; 1 = the retry's: CODECS on the
    * STREAM-INF (video + every rendition) and BANDWIDTH capped at 60 Mbit/s. */
   int variante;
+  /* At most this many audio renditions in the master (the starting track
+   * always among them); 0 = all. The 4K test row (owner 17/11). */
+  int rend_limite;
 } DoaAbrir;
 /* New session (replaces any previous one): writes the URL the TV player opens.
  * The sources are read in a thread; the player's requests wait for it. 0 =
@@ -140,7 +143,7 @@ int  doa_pedidos(void);
  * their seek index lists them (the start of each indexed block, in that
  * source's own time). Read from the index prepFonte loads anyway: no request
  * more. Tracks with fewer than 20 points are left out. */
-#define DOA_LEG_MAX 8
+#define DOA_LEG_MAX 32   /* every text track of a file (owner 17/11: the French one was the 13th) */
 typedef struct { char lingua[16], nome[64], codec[16]; int forcada, n; } DoaLegInfo;
 int  doa_legendas(int fonte, DoaLegInfo *out, int max);
 /* Start times (s, sorted) of track `k` of doa_legendas; returns the count. */

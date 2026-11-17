@@ -1,4 +1,5 @@
 #include "streams.h"
+#include "mkvfix.h"
 #include "mediaurl.h"
 #include "plrui.h"
 #include "ondever.h"
@@ -5219,6 +5220,8 @@ static int fonteAceitaAudio(int i) {
 #if defined(NV_TPK)   /* the donor server (dts/doador_tpk.h) */
   AudioExtEntrada e;
   if (!doa_disponivel() || !ajustes_audio_externo() || canalFolha || i < 0 || i >= n) return 0;
+  // Playing a file the donor server cannot open (not MKV/MP4): no audio rows.
+  if (player_aberto() && !mkvfix_conteiner_doador_ok(mkvfix_conteiner())) return 0;
   stream_audioext_entrada(&lista[i], &e);
   return e.temUrl && !e.hls && !e.naoVideo;
 #else
@@ -5227,6 +5230,16 @@ static int fonteAceitaAudio(int i) {
 #endif
 }
 static int fonteSegurarAceita(int i) { return linhaAceitaPartes(i) || fonteAceitaAudio(i); }
+// The source the player is showing right now: its own audio is already what
+// plays, so it is never offered "as audio" (owner's log 8, 17/11: a pick in the
+// then invisible menu marked the playing source as its own audio source).
+static int fonteTocando(int i) {
+  const char *v;
+  if (!player_aberto() || i < 0 || i >= n) return 0;
+  if (atual == i) return 1;
+  v = video_url_atual();
+  return v && *v && !strcmp(v, lista[i].url);
+}
 
 // Mark (or unmark) source `i` as the audio source. While a video of this title
 // plays, the choice applies at once (same as picking it in the audio menu) and
@@ -5238,6 +5251,11 @@ static void fonteMarcarAudio(int i) {
   s = &lista[i];
   if (!fonteAceitaAudio(i)) {
     if (player_aberto()) player_toast(i18n("This source can't be used as audio."), 2600);
+    return;
+  }
+  if (fonteTocando(i) && !audioext_marcada(s->url)) {
+    printf("[ext-audio] hold menu: source #%d is the one playing, not marked as audio\n", i); fflush(stdout);
+    player_toast(i18n("This source is already playing."), 2600);
     return;
   }
   if (audioext_marcada(s->url)) {
@@ -5276,17 +5294,26 @@ static void fonteMenuAbrir(int i) {
   fmIndice = i;
   faixas_idioma_principal_atualizar();
   fmModoFaixas = 0; fmSondaN = -2;
-  fmAcoes[fmN++] = FM_AUDIO;
-  if (audioext_sonda_disponivel()) fmAcoes[fmN++] = FM_FAIXAS;
+  // Owner 17/11: "Files in source" on top, the audio rows under it. The
+  // source already playing gets no audio rows (only "Stop using as audio"
+  // if it somehow carries the mark).
   if (linhaAceitaPartes(i)) fmAcoes[fmN++] = FM_ARQUIVOS;
-  printf("[ext-audio] hold OK on source #%d (%s): source menu, %d option%s\n", i,
-         lista[i].provedor[0] ? lista[i].provedor : "-", fmN, fmN == 1 ? "" : "s");
+  { int tocando = fonteTocando(i);
+    if (!tocando || fmMarcada) fmAcoes[fmN++] = FM_AUDIO;
+    if (!tocando && audioext_sonda_disponivel()) fmAcoes[fmN++] = FM_FAIXAS;
+    printf("[ext-audio] hold OK on source #%d (%s)%s: source menu, %d option%s (files %s)\n", i,
+           lista[i].provedor[0] ? lista[i].provedor : "-", tocando ? " [playing]" : "", fmN, fmN == 1 ? "" : "s",
+           linhaAceitaPartes(i) ? "first" : "not offered"); }
   fflush(stdout);
 }
 // The hold crossed its threshold on source `i`.
 static void fonteSegurou(int i) {
-  if (fonteAceitaAudio(i)) fonteMenuAbrir(i);
+  // The source playing has no audio rows: straight to its files (as before).
+  int audio = fonteAceitaAudio(i) && (!fonteTocando(i) || audioext_marcada(lista[i].url));
+  if (audio) fonteMenuAbrir(i);
   else if (linhaAceitaPartes(i)) partesAbrirPainel(i);
+  printf("[ext-audio] hold OK on source #%d: %s\n", i, audio ? "source menu" : linhaAceitaPartes(i) ? "files in source" : "nothing to open");
+  fflush(stdout);
 }
 static int fonteMenuIndice(void) {
   for (int i = 0; i < n; i++) if (!strcmp(lista[i].url, fmUrl)) return i;
@@ -5327,6 +5354,11 @@ static int fmLinhas(void) {
 static void fonteMarcarFaixa(int i, const AudioExtFaixa *f) {
   const Stream *s = &lista[i];
   if (!fonteAceitaAudio(i)) return;
+  if (fonteTocando(i)) {
+    printf("[ext-audio] hold menu: source #%d is the one playing, track not marked\n", i); fflush(stdout);
+    player_toast(i18n("This source is already playing."), 2600);
+    return;
+  }
   if (!audioext_marcada(s->url)) audioext_alternar(s->url, s->cabecalhos, s->rotulo);
   { AudioExtEntrada e;
     AudioExtIdent id;
@@ -5356,6 +5388,9 @@ static void fonteMenuEscolher(void) {
     return;
   }
   int acao = fmFoco >= 0 && fmFoco < fmN ? fmAcoes[fmFoco] : -1;
+  printf("[ext-audio] hold menu: row %d (%s) on source #%d\n", fmFoco,
+         acao == FM_ARQUIVOS ? "files" : acao == FM_FAIXAS ? "choose track" : acao == FM_AUDIO ? (fmMarcada ? "stop as audio" : "use as audio") : "-", i);
+  fflush(stdout);
   if (acao == FM_FAIXAS && i >= 0) {
     fmModoFaixas = 1; fmFoco = 0; fmSondaN = -2;
     fmSondaGer = audioext_sondar(lista[i].url, lista[i].cabecalhos);
@@ -5374,7 +5409,7 @@ static const char *fonteMenuRotulo(int r, const char **icone) {
     return fmRotFaixa[r];
   }
   if (fmAcoes[r] == FM_FAIXAS) { *icone = "aj_list-video"; return "Choose audio track…"; }
-  if (fmAcoes[r] == FM_ARQUIVOS) { *icone = "aj_folders"; return "Files of this version"; }
+  if (fmAcoes[r] == FM_ARQUIVOS) { *icone = "aj_folders"; return "Files in source"; }
   if (fmMarcada) { *icone = "pl_eye-off"; return "Stop using as audio"; }
   *icone = "pl_audio-lines";
   // Another cut than the source playing: said before it is picked.
@@ -5406,7 +5441,9 @@ static int fonteMenuEvento(const SDL_Event *e) {
   else if (k == SDLK_DOWN && fmFoco < fmLinhas() - 1) fmFoco++;
   else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) fonteMenuEscolher();
 #if defined(NV_TPK)   /* the donor server (dts/doador_tpk.h) */
-  else if (!fmModoFaixas && ((int)e->key.keysym.scancode == NV_SCANCODE_BLUE || k == SDLK_F4)) { fmFoco = 0; fonteMenuEscolher(); }
+  else if (!fmModoFaixas && ((int)e->key.keysym.scancode == NV_SCANCODE_BLUE || k == SDLK_F4)) {
+    for (int r = 0; r < fmN; r++) if (fmAcoes[r] == FM_AUDIO) { fmFoco = r; fonteMenuEscolher(); break; }
+  }
 #endif
   return 1;
 }
@@ -6814,7 +6851,6 @@ static void corpoFolha(float x, float w, float anim, Uint32 agora, int ilha) {
     if (!s) s = addons_estado()==ADD_BUSCANDO?"Buscando fontes nos addons…":"Nenhuma fonte direta disponível. Use Recarregar para tentar novamente.";
     if (!canalFolha && addons_estado()!=ADD_BUSCANDO && folhaBloqueada)
       s = "Nenhuma fonte passa pelos filtros";
-  if (fmAnim > .01f) desenhaFonteMenu(x,w,lx+rw,ptr && fmAberto);
     if (addons_estado()!=ADD_BUSCANDO && fraseVazioChips()) s = fraseVazioChips();
     if (addons_estado()!=ADD_BUSCANDO && n==0) {
       int tem = 0, p2p = stream_torrents_para_p2p();
@@ -6835,6 +6871,10 @@ static void corpoFolha(float x, float w, float anim, Uint32 agora, int ilha) {
     // Com servicos de streaming na lista, a frase vem DEPOIS deles.
     txt_bloco(TXT_PG_FIM,s,196,199,204,tx,FOLHA_TOPO+20,rw-52,28,anim,3);
   }
+  // The hold-OK source menu over the list. It sat inside the empty-list block
+  // above, so with sources listed it was open (taking every key) but never
+  // drawn: "shows nothing, frozen, Back exits" (owner's log 8, 17/11).
+  if (fmAnim > .01f) desenhaFonteMenu(x,w,lx+rw,ptr && fmAberto);
   anim=animLista; lx-=dxLista; tx-=dxLista; tr-=dxLista;
   // Na ilha, de volta ao recorte dela (plrilha corta a forma inteira).
   if (ilha) gfx_recorte(ilhaR.x,ilhaR.y,ilhaR.w,ilhaR.h);

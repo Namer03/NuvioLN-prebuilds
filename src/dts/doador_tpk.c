@@ -205,12 +205,19 @@ static int skContar(int *nuvio, int por[4]) {
   return (a > 0 ? a : 0) + (b > 0 ? b : 0);
 }
 
-enum { M_TS = 0, M_MP4, M_AC3, M_AAC, M_FORA };
-static const char *const MODO_NOME[] = { "copied (MPEG-TS)", "copied (fMP4)", "to AC3", "to AAC", "not offered" };
+enum { M_TS = 0, M_MP4, M_AC3, M_AAC, M_FORA, M_FLAC };
+// Decoded and encoded again (AC3, AAC, or FLAC for PCM).
+#define CONVERTE(m) ((m) == M_AC3 || (m) == M_AAC || (m) == M_FLAC)
+// Goes out as fragmented MP4 (copied FLAC/Opus, or PCM made FLAC).
+#define EM_MP4(m) ((m) == M_MP4 || (m) == M_FLAC)
+// In the master the TV gets: served, and not left out by the rendition limit.
+#define LISTADA(f) ((f)->modo != M_FORA && !(f)->foraLista)
+static const char *const MODO_NOME[] = { "copied (MPEG-TS)", "copied (fMP4)", "to AC3", "to AAC", "not offered", "to FLAC (fMP4, lossless)" };
 
 typedef struct {
   int si, ord, canais, taxa, modo;
   int fonte, chave;                    // fo[] it comes from; the app's key (ord, or DOA_DOADOR(ord))
+  int foraLista;                       // left out of the master by the rendition limit (DoaAbrir.rend_limite)
   enum AVCodecID id;
   char lingua[16], nome[96], codec[24];
 } Faixa;
@@ -252,6 +259,8 @@ typedef struct Sessao {
   pthread_cond_t c;
   int pronto, falhou, flacConv, audio;   // audio: index in fx[]
   int variante;                        // DoaAbrir.variante: 1 = CODECS + capped BANDWIDTH on the master (4K test)
+  int rendLimite;                      // DoaAbrir.rend_limite: 0 all renditions, else at most this many
+  uint64_t plDito;                     // audio playlists whose first lines are in the log (bit = fx index)
   atomic_int pedAudio, pedVideo, pedTotal;   // requests seen: audio segments/inits, the master, everything
   double abertoMs;                     // when doa_abrir opened it (request log)
   char motivo[160], tok[40];
@@ -473,6 +482,15 @@ static int modoDe(const Faixa *f, int flacConv) {
       if (!ok) return M_FORA;
       return f->canais > 2 ? M_AC3 : M_AAC;
     case AV_CODEC_ID_DTS: case AV_CODEC_ID_TRUEHD: case AV_CODEC_ID_MLP: return ok ? M_AC3 : M_FORA;
+    // PCM (owner's log 5, an anime with Japanese PCM: "not offered", gone
+    // from the menu in donor mode). HLS has no normal PCM carrier; FLAC is
+    // lossless (the TV decodes back the same samples) and plays as an fMP4
+    // rendition on the S95C.
+    case AV_CODEC_ID_PCM_S16LE: case AV_CODEC_ID_PCM_S24LE: case AV_CODEC_ID_PCM_S32LE:
+    case AV_CODEC_ID_PCM_S16BE: case AV_CODEC_ID_PCM_S24BE: case AV_CODEC_ID_PCM_S32BE:
+      if (!ok) return M_FORA;
+      if (avcodec_find_encoder(AV_CODEC_ID_FLAC) && f->canais >= 1 && f->canais <= 8) return M_FLAC;
+      return f->canais > 2 ? M_AC3 : M_AAC;
     default: if (!ok) return M_FORA; return f->canais > 2 ? M_AC3 : M_AAC;
   }
 }
@@ -860,6 +878,18 @@ static void *preparar(void *u) {
     if (s->umaConexao)
       for (i = 0; i < s->nfo; i++) if (i != s->fx[s->audio].fonte) fonteSoltar(s, i, "not the starting track's source");
     vigiarHosts(s);
+    // THE 4K TEST (owner 17/11): both 4K donors that never got an audio request
+    // had 7 renditions; every 4K that played had 6 or fewer. The limit keeps
+    // the starting track and the first others in the master's order.
+    if (s->rendLimite > 0) {
+      int k = 1, fora = 0;
+      for (i = 0; i < s->nfx; i++) {
+        Faixa *f = &s->fx[i];
+        if (f->modo == M_FORA || i == s->audio) continue;
+        if (k < s->rendLimite) k++; else { f->foraLista = 1; fora++; }
+      }
+      printf("[doador] rendition limit %d: %d left out of the master\n", s->rendLimite, fora);
+    }
     pthread_mutex_lock(&s->m);
     if (!s->falhou && s->aIni) {
       s->pronto = 1;
@@ -879,7 +909,7 @@ static void *preparar(void *u) {
 #define MATCH_ESPERA_S   120     // the two captures fill while playing; paused longer: given up
 #define MATCH_MAX_MS     3600000 // beyond the sync's reach: never applied
 #define SEGUIR_A_CADA_S  120.0
-typedef struct { Sessao *s; int automatico, seguir, fino; } MatchPedido;
+typedef struct { Sessao *s; int automatico, seguir, fino, siD; } MatchPedido;   // siD >= 0: the donor read on its own (another track than the one playing)
 
 // The file's audio the donor is compared with: the track in the donor
 // track's language (a dub keeps the music and effects), else its first one
@@ -990,11 +1020,13 @@ static void matchFim(Sessao *s, int achou, const DoaDopasuj *r) {
 static void *matchFio(void *u) {
   MatchPedido *pd = u;
   Sessao *s = pd->s;
-  int seguir = pd->seguir, fino = pd->fino, i, q, nk, achou = 0, como = 0, ncand = 0;
+  int seguir = pd->seguir, fino = pd->fino, siD = pd->siD, i, q, nk, achou = 0, como = 0, ncand = 0;
+  Lado proprio;
   double t0 = agoraMs(), k0, kf, ks[2], center, off = 0, razao = 1, score = 0, cand[DTS_MATCH_CAND], candSc[DTS_MATCH_CAND];
   DtsMatchSig sm, sd;
   DoaDopasuj res;
   free(pd);
+  memset(&proprio, 0, sizeof proprio);
 #ifdef SYS_gettid
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
 #endif
@@ -1004,7 +1036,7 @@ static void *matchFio(void *u) {
   for (;;) {
     int prontos, tocaDoador;
     pthread_mutex_lock(&s->mm);
-    prontos = ladoCheio(&s->mArq) && ladoCheio(&s->mDon);
+    prontos = ladoCheio(&s->mArq) && (siD >= 0 || ladoCheio(&s->mDon));
     pthread_mutex_unlock(&s->mm);
     tocaDoador = s->audio >= 0 && s->fx[s->audio].fonte == 1;
     if (prontos || s->cancel || !tocaDoador || agoraMs() - t0 > MATCH_ESPERA_S * 1000.0) break;
@@ -1013,6 +1045,26 @@ static void *matchFio(void *u) {
   dts_remux_set_tap(NULL, s, -1);
   pthread_mutex_lock(&s->mm); s->mArmD = 0; pthread_mutex_unlock(&s->mm);
   ladoSig(&s->mArq, &sm); ladoSig(&s->mDon, &sd);
+  // SAME LANGUAGE ON BOTH SIDES (owner 17/11): the tracks of one file are in
+  // sync with each other, so when the donor track playing has no language in
+  // the file (an Italian dub), the donor's track in a language the file has is
+  // read on its own over the same stretch, and its offset is the playing one's.
+  if (siD >= 0 && !s->cancel && sm.n >= (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ) {
+    const double kk = s->fo[1].k > 0 ? s->fo[1].k : 1.0, raio = fino ? 1.0 : 10.0, c = s->fo[1].desloc;
+    const double tm = sm.t0 + sm.n / 2.0 / DTS_MATCH_HZ, pad = DTS_MATCH_WIN_S / 2.0 + 5.0;
+    double lo = (tm - pad - (c + raio)) / kk - 2.0, hi = (tm + pad - (c - raio)) / kk + 2.0, mb;
+    int64_t total = s->fo[1].eng ? dts_engine_size(s->fo[1].eng) : 0;
+    if (lo < 0) lo = 0;
+    mb = total > 0 && s->fo[1].dur > 0 ? total / s->fo[1].dur * (hi - lo) / 1048576.0 : 0;
+    if (mb > 300) printf("[doador] match: the donor's same-language track would need about %.0f MB read, skipped\n", mb);
+    else {
+      printf("[doador] match: reading the donor's track %d (same language as the file's %d) on its own, %.0f-%.0f s (about %.0f MB)\n",
+             siD, s->mArq.si, lo, hi, mb);
+      fflush(stdout);
+      if (capturar(s, siD, lo, hi - lo, &proprio) == 0) ladoSig(&proprio, &sd);
+      else printf("[doador] match: the donor's own read did not fill\n");
+    }
+  }
   printf("[doador] match%s: captured %.1f s of the file at %.1f s and %.1f s of the donor at %.1f s in %.0f ms\n",
          seguir ? " (follow)" : fino ? " (audio refine)" : "",
          sm.n / (double)DTS_MATCH_HZ, sm.t0, sd.n / (double)DTS_MATCH_HZ, sd.t0, agoraMs() - t0);
@@ -1073,7 +1125,7 @@ static void *matchFio(void *u) {
                st[i].como == 2 ? "trying the offset its length suggests" : st[i].r < 100 ? "searching +-60 s" : "searching +-5 min", hi - lo, mb);
         fflush(stdout);
         memset(&lado, 0, sizeof lado);
-        if (capturar(s, s->mDon.si, lo, hi - lo, &lado) == 0) {
+        if (capturar(s, siD >= 0 ? siD : s->mDon.si, lo, hi - lo, &lado) == 0) {
           DtsMatchSig sw;
           ladoSig(&lado, &sw);
           for (q = 0; q < nk; q++) {
@@ -1105,6 +1157,15 @@ static void *matchFio(void *u) {
   }
   if (!achou) res.dica_ms = abs(s->difCorte) > 10 && abs(s->difCorte) <= 600 ? -s->difCorte * 1000 : 0;
   if (fino) res.como = 7;
+  // Owner's logs 5-7: every "not found" there was a capture cut short (another
+  // pick, or the player left) before the search ran. Said as it is.
+  if (!achou && s->cancel)
+    printf("[doador] match%s: cancelled after %.0f ms (the session closed before the search; %.1f s of the file and %.1f s of the donor captured)\n",
+           seguir ? " (follow)" : fino ? " (audio refine)" : "", agoraMs() - t0, sm.n / (double)DTS_MATCH_HZ, sd.n / (double)DTS_MATCH_HZ);
+  else if (!achou && (sm.n < (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ || sd.n < (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ))
+    printf("[doador] match%s: not searched in %.0f ms (under %d s captured: paused, seeking or not playing the donor)\n",
+           seguir ? " (follow)" : fino ? " (audio refine)" : "", agoraMs() - t0, DTS_MATCH_WIN_S + 10);
+  else
   printf("[doador] match%s: %s in %.0f ms%s\n", seguir ? " (follow)" : fino ? " (audio refine)" : "", achou ? "found" : "not found", agoraMs() - t0,
          achou ? "" : res.pesado ? " (a wide search skipped for its download)" : "");
   if (seguir) {
@@ -1138,6 +1199,7 @@ static void *matchFio(void *u) {
     }
   }
   fflush(stdout);
+  ladoLiberar(&proprio);
   soltar(s);
   return NULL;
 }
@@ -1146,7 +1208,7 @@ static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
   MatchPedido *pd;
   pthread_t t;
   const Faixa *d;
-  int siA;
+  int siA, siD = -1;
   pthread_mutex_lock(&s->m);
   if (s->mEstado == 1 || s->cancel || !s->pronto || s->audio < 0 || s->fx[s->audio].fonte != 1) {
     int ocupado = s->mEstado == 1;
@@ -1158,6 +1220,27 @@ static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
   pthread_mutex_unlock(&s->m);
   d = &s->fx[s->audio];
   siA = matchSiArquivo(s, d);
+  // The donor track playing has no language in the file (owner 17/11, Fight
+  // Club: an Italian donor on a French/English file): compare a donor track
+  // and a file track of one language instead; the offset is the same.
+  if (!seguir && d->lingua[0]) {
+    int i, j, tem = 0;
+    for (i = 0; i < s->nfx && !tem; i++)
+      if (s->fx[i].fonte == 0 && avcodec_find_decoder(s->fx[i].id) && casa(s->fx[i].lingua, d->lingua)) tem = 1;
+    for (j = 0; j < s->nfx && !tem && siD < 0; j++) {
+      const Faixa *g = &s->fx[j];
+      if (g->fonte != 1 || j == s->audio || !g->lingua[0] || !avcodec_find_decoder(g->id)) continue;
+      for (i = 0; i < s->nfx; i++)
+        if (s->fx[i].fonte == 0 && avcodec_find_decoder(s->fx[i].id) && casa(s->fx[i].lingua, g->lingua)) {
+          siD = g->si; siA = s->fx[i].si;
+          printf("[doador] match: the file has no %s track; comparing the donor's %s track %d with the file's %s track %d instead\n",
+                 d->lingua, g->lingua, g->si, s->fx[i].lingua, s->fx[i].si);
+          break;
+        }
+    }
+    if (!tem && siD < 0)
+      printf("[doador] match: no language in both the file and the donor; comparing different languages (weaker)\n");
+  }
   pd = malloc(sizeof *pd);
   pthread_mutex_lock(&s->mm);
   if (siA < 0 || !pd || ladoPreparar(&s->mArq, siA, DTS_MATCH_MAX) < 0 || ladoPreparar(&s->mDon, d->si, DTS_MATCH_MAX) < 0) {
@@ -1167,10 +1250,10 @@ static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
     if (!seguir) { DoaDopasuj z; memset(&z, 0, sizeof z); matchFim(s, 0, &z); }
     return;
   }
-  s->mArmD = 1;
+  s->mArmD = siD < 0;
   pthread_mutex_unlock(&s->mm);
   dts_remux_set_tap(tapArquivo, s, siA);
-  pd->s = s; pd->automatico = automatico; pd->seguir = seguir; pd->fino = fino;
+  pd->s = s; pd->automatico = automatico; pd->seguir = seguir; pd->fino = fino; pd->siD = siD;
   atomic_fetch_add(&s->refs, 1);
   if (pthread_create(&t, NULL, matchFio, pd) != 0) {
     atomic_fetch_sub(&s->refs, 1); free(pd);
@@ -1180,8 +1263,9 @@ static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
     return;
   }
   pthread_detach(t);
-  printf("[doador] match%s%s: capturing ~%d s of the file's audio %d and the donor's %d while playing\n",
-         seguir ? " (follow)" : fino ? " (audio refine, +-1 s)" : "", automatico ? " (by itself)" : "", DTS_MATCH_SECONDS, siA, d->si);
+  printf("[doador] match%s%s: capturing ~%d s of the file's audio %d and the donor's %d %s\n",
+         seguir ? " (follow)" : fino ? " (audio refine, +-1 s)" : "", automatico ? " (by itself)" : "", DTS_MATCH_SECONDS, siA,
+         siD >= 0 ? siD : d->si, siD >= 0 ? "(read on its own after the file's capture)" : "while playing");
   fflush(stdout);
 }
 
@@ -1192,12 +1276,26 @@ static int filaPor(Sessao *s, AVPacket *p, double t) {
   s->fila[k].p = p; s->fila[k].t = t; s->fN++;
   return 1;
 }
+// FLAC from PCM: the source's channels, 24 bits when the PCM has more than 16.
+static int flacBits(const AVCodecParameters *cp) {
+  int b = cp->bits_per_raw_sample > 0 ? cp->bits_per_raw_sample : cp->bits_per_coded_sample;
+  return b > 16 ? 24 : 16;
+}
+static int flacPreparar(AVCodecContext *e, const AVCodecParameters *cp, int canais) {
+  av_channel_layout_uninit(&e->ch_layout);
+  if (cp->ch_layout.nb_channels == canais && cp->ch_layout.order != AV_CHANNEL_ORDER_UNSPEC) av_channel_layout_copy(&e->ch_layout, &cp->ch_layout);
+  else av_channel_layout_default(&e->ch_layout, canais);
+  e->sample_rate = 48000; e->time_base = (AVRational){1, 48000};
+  if (flacBits(cp) == 24) { e->sample_fmt = AV_SAMPLE_FMT_S32; e->bits_per_raw_sample = 24; }
+  else e->sample_fmt = AV_SAMPLE_FMT_S16;
+  return 0;
+}
 static int abrirConversor(Sessao *s, const Faixa *f, char *err, size_t en) {
   AVStream *st = s->fo[f->fonte].ic->streams[f->si];
   const AVCodec *dc = avcodec_find_decoder(f->id);
-  const AVCodec *ec = avcodec_find_encoder(f->modo == M_AC3 ? AV_CODEC_ID_AC3 : AV_CODEC_ID_AAC);
+  const AVCodec *ec = avcodec_find_encoder(f->modo == M_FLAC ? AV_CODEC_ID_FLAC : f->modo == M_AC3 ? AV_CODEC_ID_AC3 : AV_CODEC_ID_AAC);
   AVChannelLayout alvo;
-  int r, ch = f->modo == M_AC3 && f->canais > 2 ? 6 : 2;
+  int r, ch = f->modo == M_FLAC ? f->canais : f->modo == M_AC3 && f->canais > 2 ? 6 : 2;
   codecLiberar(s);
   if (!dc || !ec) { snprintf(err, en, "decoder/encoder not in this build (%s)", f->codec); return -1; }
   s->dec = avcodec_alloc_context3(dc);
@@ -1211,13 +1309,19 @@ static int abrirConversor(Sessao *s, const Faixa *f, char *err, size_t en) {
   if ((r = avcodec_open2(s->dec, dc, NULL)) < 0) { snprintf(err, en, "audio decoder open (%d)", r); return -1; }
   s->enc = avcodec_alloc_context3(ec);
   if (!s->enc) { snprintf(err, en, "out of memory"); return -1; }
-  av_channel_layout_copy(&s->enc->ch_layout, &alvo);
-  s->enc->sample_rate = 48000; s->enc->time_base = (AVRational){1, 48000};
-  s->enc->sample_fmt = AV_SAMPLE_FMT_FLTP;
-  s->enc->bit_rate = f->modo == M_AC3 ? (ch == 6 ? 640000 : 192000) : 192000;
-  if (f->modo == M_AAC) { s->enc->profile = AV_PROFILE_AAC_LOW; s->enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; }
+  if (f->modo == M_FLAC) {
+    flacPreparar(s->enc, st->codecpar, ch);
+    s->enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    s->enc->compression_level = 2;   // light on the TV's CPU; still lossless
+  } else {
+    av_channel_layout_copy(&s->enc->ch_layout, &alvo);
+    s->enc->sample_rate = 48000; s->enc->time_base = (AVRational){1, 48000};
+    s->enc->sample_fmt = AV_SAMPLE_FMT_FLTP;
+    s->enc->bit_rate = f->modo == M_AC3 ? (ch == 6 ? 640000 : 192000) : 192000;
+    if (f->modo == M_AAC) { s->enc->profile = AV_PROFILE_AAC_LOW; s->enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; }
+  }
   if ((r = avcodec_open2(s->enc, ec, NULL)) < 0) { snprintf(err, en, "audio encoder open (%d)", r); return -1; }
-  s->fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, ch, 8192);
+  s->fifo = av_audio_fifo_alloc(s->enc->sample_fmt, ch, 8192);
   if (!s->fifo) { snprintf(err, en, "out of memory"); return -1; }
   s->base48 = AV_NOPTS_VALUE; s->amostras = 0;
   av_channel_layout_uninit(&alvo);
@@ -1239,10 +1343,10 @@ static int drenarFifo(Sessao *s, int tudo) {
   while (av_audio_fifo_size(s->fifo) >= fs || (tudo && av_audio_fifo_size(s->fifo) > 0)) {
     int n = av_audio_fifo_size(s->fifo) < fs ? av_audio_fifo_size(s->fifo) : fs;
     av_frame_unref(s->ef);
-    s->ef->nb_samples = fs; s->ef->format = AV_SAMPLE_FMT_FLTP; s->ef->sample_rate = 48000;
+    s->ef->nb_samples = fs; s->ef->format = s->enc->sample_fmt; s->ef->sample_rate = 48000;
     av_channel_layout_copy(&s->ef->ch_layout, &s->enc->ch_layout);
     if (av_frame_get_buffer(s->ef, 0) < 0) return -1;
-    if (n < fs) av_samples_set_silence(s->ef->data, 0, fs, s->ef->ch_layout.nb_channels, AV_SAMPLE_FMT_FLTP);
+    if (n < fs) av_samples_set_silence(s->ef->data, 0, fs, s->ef->ch_layout.nb_channels, s->enc->sample_fmt);
     av_audio_fifo_read(s->fifo, (void **)s->ef->data, n);
     s->ef->pts = s->base48 + s->amostras;
     s->amostras += fs;
@@ -1317,7 +1421,7 @@ static int produzir(Sessao *s, const Faixa *f, char *err, size_t en) {
       if (!s->swr) {
         // Another speed: the samples are made at 48 kHz * k and taken as 48
         // kHz (the audio lasts k times longer, its pitch follows).
-        if (swr_alloc_set_opts2(&s->swr, &s->enc->ch_layout, AV_SAMPLE_FMT_FLTP, (int)lround(48000.0 * fo->k), &s->fr->ch_layout,
+        if (swr_alloc_set_opts2(&s->swr, &s->enc->ch_layout, s->enc->sample_fmt, (int)lround(48000.0 * fo->k), &s->fr->ch_layout,
                                 s->fr->format, s->fr->sample_rate, 0, NULL) < 0 || swr_init(s->swr) < 0) {
           snprintf(err, en, "resampler"); av_frame_unref(s->fr); return -1;
         }
@@ -1329,7 +1433,7 @@ static int produzir(Sessao *s, const Faixa *f, char *err, size_t en) {
       { int max = swr_get_out_samples(s->swr, s->fr->nb_samples);
         uint8_t **buf = NULL;
         if (max > 0 && av_samples_alloc_array_and_samples(&buf, NULL, s->enc->ch_layout.nb_channels, max,
-                                                          AV_SAMPLE_FMT_FLTP, 0) >= 0) {
+                                                          s->enc->sample_fmt, 0) >= 0) {
           int k = swr_convert(s->swr, buf, max, (const uint8_t **)s->fr->extended_data, s->fr->nb_samples);
           if (k > 0) av_audio_fifo_write(s->fifo, (void **)buf, k);
           av_freep(&buf[0]); av_freep(&buf);
@@ -1381,7 +1485,7 @@ static int posicionar(Sessao *s, int fi, int seg, const double *ini, double len,
   s->eof = 0;
   s->proxPts = AV_NOPTS_VALUE;   // a seek: the next timestamp comes from the file again
   { int i; for (i = 0; i < (int)fo->ic->nb_streams; i++) fo->ic->streams[i]->discard = i == f->si ? AVDISCARD_DEFAULT : AVDISCARD_ALL; }
-  if (f->modo == M_AC3 || f->modo == M_AAC) { if (abrirConversor(s, f, err, en) < 0) { s->gOk = 0; return -1; } }
+  if (CONVERTE(f->modo)) { if (abrirConversor(s, f, err, en) < 0) { s->gOk = 0; return -1; } }
   else codecLiberar(s);
   dts_engine_interrupt(fo->eng, 0);
   s->gFonte = f->fonte; s->gDesloc = fo->desloc;
@@ -1464,7 +1568,7 @@ static unsigned char *muxFim(Mux *m, int mp4, int semCabecalho, size_t *n) {
 }
 // Parameters of what goes out for track f (copied, or the encoder's).
 static int parametrosSaida(Sessao *s, const Faixa *f, AVCodecParameters *p, AVRational *tb) {
-  if (s->enc && (f->modo == M_AC3 || f->modo == M_AAC)) {
+  if (s->enc && CONVERTE(f->modo)) {
     avcodec_parameters_from_context(p, s->enc);
     *tb = (AVRational){1, 48000};
   } else {
@@ -1497,7 +1601,7 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   AVCodecParameters *par = avcodec_parameters_alloc();
   AVRational tb, srcTb;
   Mux m;
-  int mp4 = f->modo == M_MP4, saltou = 0, nPk = 0, rr = 0, ab = 0;
+  int mp4 = EM_MP4(f->modo), saltou = 0, nPk = 0, rr = 0, ab = 0;
   // FLAC/Opus (owner 17/11: a donor's FLAC had no sound): packets, their
   // lengths and sizes, and what of the segment they cover, first 3 segments.
   int diag = 0, dSem = 0, tMin = 1 << 30, tMax = 0;
@@ -1507,8 +1611,24 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   if (!par) { snprintf(err, en, "out of memory"); return -1; }
   if (seg < 0) {   // init: the header alone (the converter state is not touched)
     AVStream *as = s->fo[f->fonte].ic->streams[f->si];
-    avcodec_parameters_copy(par, as->codecpar);
-    if (muxAbrir(&m, "mp4", NULL, (AVRational){0, 1}, par, as->time_base, f->lingua) < 0) {
+    AVRational itb = as->time_base;
+    if (f->modo == M_FLAC) {
+      // PCM made FLAC: the header a FLAC encoder with the same settings writes
+      // (its STREAMINFO), from a throwaway encoder, so the session's own
+      // converter is not touched.
+      const AVCodec *ec = avcodec_find_encoder(AV_CODEC_ID_FLAC);
+      AVCodecContext *e = ec ? avcodec_alloc_context3(ec) : NULL;
+      int ok = 0;
+      if (e) {
+        flacPreparar(e, as->codecpar, f->canais);
+        e->flags |= AV_CODEC_FLAG_GLOBAL_HEADER; e->compression_level = 2;
+        ok = avcodec_open2(e, ec, NULL) >= 0 && avcodec_parameters_from_context(par, e) >= 0;
+      }
+      avcodec_free_context(&e);
+      if (!ok) { avcodec_parameters_free(&par); snprintf(err, en, "fMP4 init (FLAC encoder)"); return -1; }
+      itb = (AVRational){1, 48000};
+    } else avcodec_parameters_copy(par, as->codecpar);
+    if (muxAbrir(&m, "mp4", NULL, (AVRational){0, 1}, par, itb, f->lingua) < 0) {
       muxFechar(&m); avcodec_parameters_free(&par); snprintf(err, en, "fMP4 init (muxer)"); return -1;
     }
     { uint8_t *b = NULL; int k = avio_close_dyn_buf(m.oc->pb, &b); m.oc->pb = NULL;
@@ -1623,7 +1743,7 @@ static void tx(Txt *t, const char *fmt, ...) {
 }
 // One audio rendition: AUD_SEG_S segments (short: a seek reads ~2 s).
 static void plAudio(Sessao *s, Txt *t, int k) {
-  int i, mp4 = s->fx[k].modo == M_MP4;
+  int i, mp4 = EM_MP4(s->fx[k].modo);
   tx(t, "#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-TARGETDURATION:%d\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
         "#EXT-X-INDEPENDENT-SEGMENTS\n", mp4 ? 7 : 3, (int)ceil(AUD_SEG_S));
   if (mp4) tx(t, "#EXT-X-MAP:URI=\"a%d_init.mp4\"\n", k);
@@ -1644,6 +1764,7 @@ static const char *codecsAudio(const Faixa *f) {
     case M_AC3: return "ac-3";
     case M_AAC: return "mp4a.40.2";
     case M_MP4: return f->id == AV_CODEC_ID_OPUS ? "Opus" : "fLaC";
+    case M_FLAC: return "fLaC";
     default:
       return f->id == AV_CODEC_ID_AC3 ? "ac-3" : f->id == AV_CODEC_ID_EAC3 ? "ec-3" : f->id == AV_CODEC_ID_MP3 ? "mp4a.40.34" :
              f->id == AV_CODEC_ID_MP2 ? "mp4a.40.33" : "mp4a.40.2";
@@ -1651,13 +1772,13 @@ static const char *codecsAudio(const Faixa *f) {
 }
 static void plMaster(Sessao *s, Txt *t) {
   int i, mp4 = 0;
-  for (i = 0; i < s->nfx; i++) if (s->fx[i].modo == M_MP4) mp4 = 1;
+  for (i = 0; i < s->nfx; i++) if (EM_MP4(s->fx[i].modo) && !s->fx[i].foraLista) mp4 = 1;
   tx(t, "#EXTM3U\n#EXT-X-VERSION:%d\n#EXT-X-INDEPENDENT-SEGMENTS\n", mp4 ? 7 : 4);
   for (i = 0; i < s->nfx; i++) {
     const Faixa *f = &s->fx[i];
     char nome[128];
     int ch = f->modo == M_AC3 ? (f->canais > 2 ? 6 : 2) : f->modo == M_AAC ? 2 : f->canais;
-    if (f->modo == M_FORA) continue;
+    if (!LISTADA(f)) continue;
     nomeRendicao(s, f, nome, sizeof nome);
     tx(t, "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"%s\"", nome);
     if (f->lingua[0]) tx(t, ",LANGUAGE=\"%s\"", f->lingua);
@@ -1675,10 +1796,10 @@ static void plMaster(Sessao *s, Txt *t) {
     char cod[256];
     size_t u = (size_t)snprintf(cod, sizeof cod, "%s", s->vCodecs);
     for (i = 0; i < s->nfx; i++) {
-      const char *c = s->fx[i].modo == M_FORA ? NULL : codecsAudio(&s->fx[i]);
+      const char *c = !LISTADA(&s->fx[i]) ? NULL : codecsAudio(&s->fx[i]);
       int j, dup = 0;
       if (!c) continue;
-      for (j = 0; j < i; j++) if (s->fx[j].modo != M_FORA && !strcmp(codecsAudio(&s->fx[j]), c)) dup = 1;
+      for (j = 0; j < i; j++) if (LISTADA(&s->fx[j]) && !strcmp(codecsAudio(&s->fx[j]), c)) dup = 1;
       if (!dup && u + strlen(c) + 2 < sizeof cod) u += (size_t)snprintf(cod + u, sizeof cod - u, "%s%s", u ? "," : "", c);
     }
     tx(t, "#EXT-X-STREAM-INF:BANDWIDTH=%ld,AUDIO=\"aud\"", s->banda + 1500000L > 60000000L ? 60000000L : s->banda + 1500000L);
@@ -1790,10 +1911,21 @@ static int atender(int so, const char *metodo, const char *caminho, int manter) 
     ok = t.b && responder(so, 200, "application/vnd.apple.mpegurl", t.b, t.n, manter, head, s);
     printf("[doador] audio playlist a%d (%s audio %d, %s, %d segments of %.0f s) served\n", k, s->fx[k].fonte ? "donor" : "file",
            s->fx[k].ord, MODO_NOME[s->fx[k].modo], s->naSeg, AUD_SEG_S);
+    // Its head, once per track (owner's log 6: the TV took a 4K donor's
+    // playlist and never asked for a segment).
+    if (t.b && k < 64 && !(s->plDito & (UINT64_C(1) << k))) {
+      const char *c = t.b; int l = 0;
+      s->plDito |= UINT64_C(1) << k;
+      while (*c && l < 9) {
+        const char *e = strchr(c, '\n'); int len = e ? (int)(e - c) : (int)strlen(c);
+        printf("[doador]   a%d | %.*s\n", k, len, c);
+        l++; c = e ? e + 1 : c + len;
+      }
+    }
     fflush(stdout);
     free(t.b);
   } else if (sscanf(nome, "a%d_init.mp4", &k) == 1 && strstr(nome, "_init.mp4")) {
-    if (k < 0 || k >= s->nfx || s->fx[k].modo != M_MP4) { soltar(s); return responder(so, 404, NULL, "", 0, manter, head, s); }
+    if (k < 0 || k >= s->nfx || !EM_MP4(s->fx[k].modo)) { soltar(s); return responder(so, 404, NULL, "", 0, manter, head, s); }
     pthread_mutex_lock(&s->gm);
     e = gerarAudio(s, k, -1, &r, err, sizeof err, -1, -1);
     pthread_mutex_unlock(&s->gm);
@@ -1915,6 +2047,7 @@ int doa_abrir(const DoaAbrir *o, char *out, size_t n) {
   s->audio = o->audio; s->gFaixa = -1; s->gSeg = -1; s->gFonte = -1; s->proxPts = AV_NOPTS_VALUE;
   s->abertoMs = agoraMs();
   s->variante = o->variante;
+  s->rendLimite = o->rend_limite > 0 ? o->rend_limite : 0;
   s->umaConexao = !o->duas_conexoes;
   s->nfo = doador ? 2 : 1;
   // The converter's master (".../m.m3u8") names its media playlist v.m3u8:
@@ -1986,7 +2119,7 @@ int doa_rendicao_de(int ord) {
   int v = -1, i, k = 0;
   if (s && s->pronto)
     for (i = 0; i < s->nfx; i++) {
-      if (s->fx[i].modo == M_FORA) continue;
+      if (!LISTADA(&s->fx[i])) continue;
       if (s->fx[i].chave == ord) { v = k; break; }
       k++;
     }
@@ -1998,7 +2131,7 @@ void doa_definir_audio(int ord) {
   int i;
   if (s && s->pronto) {
     pthread_mutex_lock(&s->gm);
-    for (i = 0; i < s->nfx; i++) if (s->fx[i].chave == ord && s->fx[i].modo != M_FORA) s->audio = i;
+    for (i = 0; i < s->nfx; i++) if (s->fx[i].chave == ord && LISTADA(&s->fx[i])) s->audio = i;
     pthread_mutex_unlock(&s->gm);
     if (ord >= DOA_DOADOR(0)) printf("[doador] donor audio %d is the session's track now\n", ord - DOA_DOADOR(0));
     else printf("[doador] audio %d is the session's track now\n", ord);
@@ -2013,7 +2146,7 @@ int doa_rendicoes(DoaRendicao *out, int max) {
   if (s && s->pronto)
     for (i = 0; i < s->nfx && k < max; i++) {
       const Faixa *f = &s->fx[i];
-      if (f->modo == M_FORA) continue;
+      if (!LISTADA(f)) continue;
       if (out) {
         DoaRendicao *r = &out[k];
         memset(r, 0, sizeof *r);
@@ -2022,7 +2155,7 @@ int doa_rendicoes(DoaRendicao *out, int max) {
         r->canais = f->modo == M_AC3 ? (f->canais > 2 ? 6 : 2) : f->modo == M_AAC ? 2 : f->canais;
         snprintf(r->lingua, sizeof r->lingua, "%s", f->lingua);
         snprintf(r->nome, sizeof r->nome, "%s", f->nome);
-        snprintf(r->codec, sizeof r->codec, "%s", f->modo == M_AC3 ? "ac3" : f->modo == M_AAC ? "aac" : f->codec);
+        snprintf(r->codec, sizeof r->codec, "%s", f->modo == M_AC3 ? "ac3" : f->modo == M_AAC ? "aac" : f->modo == M_FLAC ? "flac" : f->codec);
       }
       k++;
     }

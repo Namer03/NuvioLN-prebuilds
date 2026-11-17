@@ -16,6 +16,10 @@
 #define DL_PARES   3        // pairs tried, best first
 #define DL_MAXPTS  6000     // points per track (the engine takes up to 8000 cues)
 #define DL_FIM_MAX 4.0      // an estimated end: the next start, at most this after its own
+// Pairs in two different languages (owner 17/11: the match compares when lines
+// start, and translations of one release mostly follow the same speech): only
+// when no language is shared, and only with this much confidence.
+#define DL_CONF_CRUZADO 0.90
 
 static int casaPadrao(const char *a, const char *b) { return a[0] && b[0] && !strcasecmp(a, b); }
 static int contem(const char *h, const char *n) {
@@ -44,6 +48,26 @@ int doadorleg_pares(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb,
       c[n].i = i; c[n].j = j;
       c[n].p = r * 10.0 + (ehSdh(&a[i]) == ehSdh(&b[j]) ? 5.0 : 0.0) + (!ehAss(&a[i]) && !ehAss(&b[j]) ? 2.0 : 0.0) +
                (!a[i].lingua[0] ? -3.0 : 0.0);
+      n++;
+    }
+  for (i = 1; i < n; i++) for (k = i; k > 0 && c[k].p > c[k - 1].p; k--) { t = c[k]; c[k] = c[k - 1]; c[k - 1] = t; }
+  for (i = 0; i < n && i < max; i++) { ia[i] = c[i].i; ib[i] = c[i].j; }
+  return n < max ? n : max;
+}
+
+int doadorleg_pares_cruzados(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb, int *ia, int *ib, int max) {
+  struct { int i, j; double p; } c[64], t;
+  int n = 0, i, j, k;
+  for (i = 0; i < na; i++)
+    for (j = 0; j < nb && n < 64; j++) {
+      double r;
+      if (a[i].forcada || b[j].forcada) continue;
+      r = a[i].n > b[j].n ? (double)b[j].n / a[i].n : (double)a[i].n / b[j].n;
+      if (r < 0.5) continue;
+      c[n].i = i; c[n].j = j;
+      // Closest line counts first; SDH with SDH; SRT before ASS (typeset ASS
+      // splits a line into many starts).
+      c[n].p = r * 10.0 + (ehSdh(&a[i]) == ehSdh(&b[j]) ? 3.0 : 0.0) + (!ehAss(&a[i]) && !ehAss(&b[j]) ? 2.0 : 0.0);
       n++;
     }
   for (i = 1; i < n; i++) for (k = i; k > 0 && c[k].p > c[k - 1].p; k--) { t = c[k]; c[k] = c[k - 1]; c[k - 1] = t; }
@@ -100,7 +124,7 @@ static LegendaDocumento *documento(const double *t, int n, int ass, const char *
 }
 
 typedef struct {
-  int ia[DL_PARES], ib[DL_PARES], n;
+  int ia[DL_PARES], ib[DL_PARES], n, cruzado;
   DoaLegInfo a[DOA_LEG_MAX], b[DOA_LEG_MAX];
   double *ta[DL_PARES], *tb[DL_PARES]; int na[DL_PARES], nb[DL_PARES];
   double pos;
@@ -124,8 +148,14 @@ static void terminar(unsigned ger, int achou, double k, double d, const char *mo
   pthread_mutex_unlock(&trava);
 }
 
+static int alinharMin(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                      double pos, double confMin, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u);
 int doadorleg_alinhar(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                       double pos, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
+  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, k, desloc, motivo, mn, cancelar, u);
+}
+static int alinharMin(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                      double pos, double confMin, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
   double sa[2], sb[2];
   LegendaDocumento *ref = documento(ta, na, assA, la, "file", sa);
   LegendaDocumento *doc = documento(tb, nb, assB, lb, "donor", sb);
@@ -147,7 +177,10 @@ int doadorleg_alinhar(const double *ta, int na, int assA, const char *la, const 
          "confidence %.2f, coverage %.2f) in %.0f ms\n", na, sa[0], sa[1], nb, sb[0], sb[1],
          r.estado == AUTOSYNC_ACCEPTED ? "ACCEPTED" : "not accepted", autosync_motivo(r.motivo), r.offsetMs, r.escala, r.trechos,
          r.confianca, r.cobertura, (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
-  if (r.estado == AUTOSYNC_ACCEPTED) {
+  if (r.estado == AUTOSYNC_ACCEPTED && r.confianca < confMin) {
+    snprintf(motivo, mn, "two languages: confidence %.2f under %.2f", r.confianca, confMin);
+    printf("[doadorleg] two languages: confidence %.2f is under the %.2f they need, not used\n", r.confianca, confMin);
+  } else if (r.estado == AUTOSYNC_ACCEPTED) {
     // Two points of the file's time, from the playhead on (another cut: the
     // piece the viewer is in), mapped to the donor's.
     double t1s = pos > sa[0] + 60 ? pos : sa[0] + (sa[1] - sa[0]) * 0.25, t2s = t1s + 600.0, d1, d2;
@@ -175,10 +208,10 @@ static void *fio(void *u) {
   for (i = 0; i < p->n && !achou && !cancelado((void *)(uintptr_t)p->ger); i++) {
     const DoaLegInfo *a = &p->a[p->ia[i]], *b = &p->b[p->ib[i]];
     char m[120] = "";
-    printf("[doadorleg] pair %d: file %s %s \"%.30s\" / donor %s %s \"%.30s\"\n", i + 1, a->lingua[0] ? a->lingua : "und", a->codec,
-           a->nome, b->lingua[0] ? b->lingua : "und", b->codec, b->nome);
-    achou = doadorleg_alinhar(p->ta[i], p->na[i], ehAss(a), a->lingua, p->tb[i], p->nb[i], ehAss(b), b->lingua, p->pos, &k, &d,
-                              m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
+    printf("[doadorleg] pair %d%s: file %s %s \"%.30s\" / donor %s %s \"%.30s\"\n", i + 1, p->cruzado ? " (two languages)" : "",
+           a->lingua[0] ? a->lingua : "und", a->codec, a->nome, b->lingua[0] ? b->lingua : "und", b->codec, b->nome);
+    achou = alinharMin(p->ta[i], p->na[i], ehAss(a), a->lingua, p->tb[i], p->nb[i], ehAss(b), b->lingua, p->pos,
+                       p->cruzado ? DL_CONF_CRUZADO : 0.0, &k, &d, m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
     if (!achou) snprintf(motivo, sizeof motivo, "pair %d (%s %s / %s %s): %s", i + 1, a->lingua, a->codec, b->lingua, b->codec, m);
   }
   terminar(p->ger, achou, k, d, achou ? "" : motivo);
@@ -198,7 +231,12 @@ void doadorleg_iniciar(double pos) {
   na = doa_legendas(0, p->a, DOA_LEG_MAX);
   nb = doa_legendas(1, p->b, DOA_LEG_MAX);
   p->n = doadorleg_pares(p->a, na, p->b, nb, ling_casa, p->ia, p->ib, DL_PARES);
-  printf("[doadorleg] subtitle match: the file has %d indexed text track(s), the donor %d: %d pair(s) to try\n", na, nb, p->n);
+  if (!p->n && na && nb) {
+    p->n = doadorleg_pares_cruzados(p->a, na, p->b, nb, p->ia, p->ib, DL_PARES);
+    p->cruzado = p->n > 0;
+  }
+  printf("[doadorleg] subtitle match: the file has %d indexed text track(s), the donor %d: %d pair(s) to try%s\n", na, nb, p->n,
+         p->cruzado ? " (no shared language: pairs in two languages, confidence 0.90 needed)" : "");
   fflush(stdout);
   for (i = 0; i < p->n; i++) {
     p->ta[i] = malloc(sizeof(double) * DL_MAXPTS); p->tb[i] = malloc(sizeof(double) * DL_MAXPTS);
@@ -206,7 +244,7 @@ void doadorleg_iniciar(double pos) {
     p->nb[i] = p->tb[i] ? doa_legenda_tempos(1, p->ib[i], p->tb[i], DL_MAXPTS) : 0;
   }
   if (!p->n) {
-    terminar(ger, 0, 1, 0, na && nb ? "no subtitle language both have" : !na ? "the file's subtitles are not in its index"
+    terminar(ger, 0, 1, 0, na && nb ? "no pair of full subtitle tracks (forced only, or line counts too far apart)" : !na ? "the file's subtitles are not in its index"
                                                                          : "the donor's subtitles are not in its index");
     free(p);
     return;

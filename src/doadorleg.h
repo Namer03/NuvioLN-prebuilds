@@ -30,6 +30,9 @@ int  doadorleg_resultado(double *k, double *desloc, char *motivo, size_t n);
  * the point counts closest, SRT before ASS. Returns how many (up to max). */
 int  doadorleg_pares(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb,
                      int (*casa)(const char *, const char *), int *ia, int *ib, int max);
+/* When no language is shared: pairs in two languages (forced never, line
+ * counts within 2x), best first. The match then needs confidence 0.90. */
+int  doadorleg_pares_cruzados(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb, int *ia, int *ib, int max);
 /* Start times -> a line from the two-point map. `donorDe(t)` = the donor's
  * time at the file's t. Fills k (file seconds per donor second) and desloc. */
 int  doadorleg_reta(double t1, double d1, double t2, double d2, double *k, double *desloc);

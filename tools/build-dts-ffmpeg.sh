@@ -23,6 +23,7 @@ PREFIX=${NUVIO_DTS_ROOT:-/opt/nuvio-dts}
 BUILD=${NUVIO_DTS_BUILD:-${TMPDIR:-/tmp}/nuvio-dts-build}
 TARGET=${NUVIO_DTS_TARGET:-webos}
 DECODERS=dca,dvdsub,pgssub,ass,ssa,subrip,movtext,webvtt
+ENCODERS=aac,ac3
 MUXERS=
 PARSERS=dca,h264,hevc,aac
 BSFS=h264_mp4toannexb,hevc_mp4toannexb,dca_core
@@ -32,6 +33,11 @@ if [ "$TARGET" = tpk ]; then
   SRC=${NUVIO_DTS_SRC:?tools/tpk.sh passes the extracted ffmpeg-$VERSION source}
   CC=${CC:-gcc}
   DECODERS=$DECODERS,truehd,mlp,ac3,eac3,aac,opus,flac,vorbis,mp3float,mp2float
+  # PCM (Matroska A_PCM/INT, MP4 lpcm/sowt/twos): the donor server serves a
+  # file's PCM track as lossless FLAC in fMP4 (owner 17/11; PCM has no normal
+  # HLS carrier) and the audio match can read it.
+  DECODERS=$DECODERS,pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be,pcm_s32be
+  ENCODERS=$ENCODERS,flac
   MUXERS=mpegts,matroska,mp4
   PARSERS=$PARSERS,mlp,ac3,opus,flac,vorbis,mpegaudio
   BSFS=$BSFS,truehd_core
@@ -72,7 +78,7 @@ fi
   --disable-programs --disable-doc --disable-debug --disable-network \
   --disable-avdevice --disable-avfilter --disable-swscale --disable-postproc \
   --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
-  --enable-decoder="$DECODERS" --enable-encoder=aac,ac3 \
+  --enable-decoder="$DECODERS" --enable-encoder="$ENCODERS" \
   --enable-demuxer=matroska,mov --enable-parser="$PARSERS" \
   --enable-bsf="$BSFS" \
   --extra-cflags="${CFLAGS:--O2}"

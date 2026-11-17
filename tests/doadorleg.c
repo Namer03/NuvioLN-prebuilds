@@ -3,6 +3,7 @@
 // speed, with a few lines only one release has. The engine is the subtitle
 // sync's (autosync.c).
 #include "../src/doadorleg.h"
+#include "../src/mkvfix.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -65,6 +66,29 @@ int main(void) {
     strcpy(b[2].lingua, "de"); strcpy(b[2].codec, "subrip"); b[2].n = 950;
     n = doadorleg_pares(a, 3, b, 3, ling_casa, ia, ib, 3);
     assert(n == 2 && ia[0] == 1 && ib[0] == 0 && ia[1] == 0 && ib[1] == 0); }
+  // 4b. No shared language: pairs in two languages, forced never, closest counts first.
+  { DoaLegInfo a[2], b[2];
+    int ia[3], ib[3], n;
+    memset(a, 0, sizeof a); memset(b, 0, sizeof b);
+    strcpy(a[0].lingua, "fr"); strcpy(a[0].codec, "subrip"); a[0].n = 1000;
+    strcpy(a[1].lingua, "fr"); strcpy(a[1].codec, "subrip"); a[1].forcada = 1; a[1].n = 30;
+    strcpy(b[0].lingua, "it"); strcpy(b[0].codec, "ass"); b[0].n = 1900;
+    strcpy(b[1].lingua, "en"); strcpy(b[1].codec, "subrip"); b[1].n = 1100;
+    assert(doadorleg_pares(a, 2, b, 2, ling_casa, ia, ib, 3) == 0);
+    n = doadorleg_pares_cruzados(a, 2, b, 2, ia, ib, 3);
+    assert(n == 2 && ia[0] == 0 && ib[0] == 1 && ib[1] == 0); }
+  // 4c. What a file is from its first bytes (the donor server opens MKV/MP4).
+  { unsigned char b[400];
+    memset(b, 0, sizeof b);
+    b[0] = 0x1A; b[1] = 0x45; b[2] = 0xDF; b[3] = 0xA3;
+    assert(mkvfix_conteiner_de(b, sizeof b) == MKVFIX_CONT_MKV);
+    memset(b, 0, sizeof b); memcpy(b + 4, "ftyp", 4);
+    assert(mkvfix_conteiner_de(b, sizeof b) == MKVFIX_CONT_MP4);
+    memset(b, 0, sizeof b); b[0] = 0x47; b[188] = 0x47;
+    assert(mkvfix_conteiner_de(b, sizeof b) == MKVFIX_CONT_TS && !mkvfix_conteiner_doador_ok(MKVFIX_CONT_TS));
+    memset(b, 0, sizeof b); b[4] = 0x47; b[196] = 0x47;
+    assert(mkvfix_conteiner_de(b, sizeof b) == MKVFIX_CONT_M2TS);
+    assert(mkvfix_conteiner_doador_ok(MKVFIX_CONT_DESCONHECIDO) && mkvfix_conteiner_doador_ok(MKVFIX_CONT_MP4)); }
   // 5. The line: two points, snapped to the known ratio.
   assert(doadorleg_reta(100.0, 100.1, 700.0, 700.7, &k, &des) && fabs(k - 23976.0 / 24000.0) < 1e-9);
   assert(!doadorleg_reta(100.0, 100.0, 110.0, 110.0, &k, &des));

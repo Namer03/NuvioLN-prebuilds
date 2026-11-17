@@ -67,6 +67,8 @@ void dts_engine_final_host(DtsEngine *e, char *h, int n) { (void)e; if (h && n >
 #include <libavutil/audio_fifo.h>
 #include <libavutil/opt.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/time.h>
+#include "../mkvfix.h"
 #include <libswresample/swresample.h>
 #define RANGE_BYTES (1024 * 1024)
 /* Dolby Vision path (dts_engine_dv): 4K sources of 25-30 Mbit/s starved on
@@ -163,6 +165,46 @@ static uint64_t clock_ns(clockid_t clock) {
 }
 void dts_engine_metrics(DtsEngine *e,DtsEngineMetrics *out) {
   if(out) { if(e) *out=e->metrics; else memset(out,0,sizeof(*out)); }
+}
+// MEMORY PER OPEN (owner's log 5, 17/11: RSS 140 -> 571 MB and MemAvailable
+// 45 MB while an 18-subtitle anime MKV was opened three times at once). The
+// Matroska demuxer copies every attachment (fonts) into its stream's
+// extradata, beside its own copy: nothing here reads them, so that copy goes
+// right after the open, and the log says what each open cost.
+static long engKB(const char *arq, const char *chave) {
+  char l[256]; long v = -1; size_t n = strlen(chave);
+  FILE *f = fopen(arq, "r");
+  if (!f) return -1;
+  while (fgets(l, sizeof l, f)) if (!strncmp(l, chave, n)) { v = strtol(l + n, NULL, 10); break; }
+  fclose(f);
+  return v;
+}
+static void engMem(long *rss, long *livre) { *rss = engKB("/proc/self/status", "VmRSS:"); *livre = engKB("/proc/meminfo", "MemAvailable:"); }
+static void engAnexos(DtsEngine *e, const char *qual, long rss0, double t0ms) {
+  long rss1, livre; int n = 0; int64_t bytes = 0;
+  for (unsigned i = 0; e->fmt && i < e->fmt->nb_streams; i++) {
+    AVCodecParameters *p = e->fmt->streams[i]->codecpar;
+    if (p->codec_type != AVMEDIA_TYPE_ATTACHMENT) continue;
+    n++; bytes += p->extradata_size;
+    av_freep(&p->extradata); p->extradata_size = 0;
+  }
+  engMem(&rss1, &livre);
+  printf("[dts-engine] %s open: %u streams, %d attachment(s) %.1f MB (their copy freed); RSS %.0f -> %.0f MB, MemAvailable %.0f MB, %.0f ms\n",
+         qual, e->fmt ? e->fmt->nb_streams : 0, n, bytes / 1048576.0, rss0 / 1024.0, rss1 / 1024.0, livre / 1024.0,
+         (double)(av_gettime_relative() / 1000) - t0ms);
+  fflush(stdout);
+}
+// A file that did not open: what its first bytes say it is (owner's log 6: a
+// Fight Club REMUX that was neither MKV nor MP4; this FFmpeg reads only those).
+static void engPrimeiros(DtsEngine *e, const char *qual) {
+  const unsigned char *b = e->io ? e->io->buffer : NULL;
+  long n = e->io && e->io->buf_end > e->io->buffer ? (long)(e->io->buf_end - e->io->buffer) : 0;
+  char hx[40]; size_t u = 0;
+  if (!b || n <= 0) return;
+  for (int i = 0; i < 16 && i < n && u + 3 < sizeof hx; i++) u += (size_t)snprintf(hx + u, sizeof hx - u, "%02x", b[i]);
+  printf("[dts-engine] %s did not open: its first bytes %s look like %s (this FFmpeg opens MKV and MP4)\n", qual, hx,
+         mkvfix_conteiner_nome(mkvfix_conteiner_de(b, n)));
+  fflush(stdout);
 }
 static int fail(DtsEngine *e,const char *msg,int code) {
   char detail[64] = "";
@@ -854,8 +896,11 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
   av_dict_set(&opts,"format_whitelist","matroska,webm,mov",0);
   av_dict_set(&opts,"probesize","4194304",0);
   av_dict_set(&opts,"analyzeduration","5000000",0);
+  long rss0, livre0; engMem(&rss0, &livre0);
+  double t0ms = (double)(av_gettime_relative() / 1000);
   int r=avformat_open_input(&e->fmt,NULL,NULL,&opts); av_dict_free(&opts);
-  if(r<0) return fail(e,"Container open",r);
+  if(r<0) { engPrimeiros(e, "the converter's file"); return fail(e,"Container open",r); }
+  engAnexos(e, "converter", rss0, t0ms);
   r=avformat_find_stream_info(e->fmt,NULL);
   e->opening=0;
   if(r<0) return fail(e,"Container metadata",r);
@@ -992,8 +1037,11 @@ int dts_engine_open_demux(DtsEngine *e,const char *url,const char *headers) {
   AVDictionary *opts=NULL;
   av_dict_set(&opts,"format_whitelist","matroska,webm,mov",0);
   av_dict_set(&opts,"probesize","1048576",0);
+  long rss0, livre0; engMem(&rss0, &livre0);
+  double t0ms = (double)(av_gettime_relative() / 1000);
   int r=avformat_open_input(&e->fmt,NULL,NULL,&opts); av_dict_free(&opts);
-  if(r<0) return fail(e,"Container open",r);
+  if(r<0) { engPrimeiros(e, "the file"); return fail(e,"Container open",r); }
+  engAnexos(e, "demux", rss0, t0ms);
   if(e->fmt->duration==AV_NOPTS_VALUE || e->fmt->duration<=0) {
     /* MOV fills only the stream durations (the container's comes from
      * find_stream_info, which this path skips because it reads packets). */

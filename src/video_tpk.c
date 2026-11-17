@@ -273,6 +273,10 @@ static struct {
   // never one audio segment): one retry with the master's form 1, then the
   // audio that played before the pick.
   int variante, semAudioFeito;
+  // When the audio server served its first master (doa_pronto): the start
+  // checks count from here (owner's log 5: a 17.5 s open made the 15 s check
+  // fire with only the master asked for).
+  Uint32 prontoEm;
   char conv[256];        // the converter's URL (kept when only the donor changes)
 } dv;
 // The converter's track before the donor took over (a DTS file's converted
@@ -531,6 +535,14 @@ void nv_tpk_video_evento(int tipo, int a, int b) {
     default: break;
   }
   if (tipo != EV_BUFFER) { printf("[video] tpk evento %d (%d, %d)\n", tipo, a, b); fflush(stdout); }
+  // While another source's audio starts (until it plays), the TV player's
+  // buffering too, in 25 % steps (owner's log 6: 4K donors that never asked
+  // for audio; what the player did meanwhile).
+  else if (dv.ativo && doa_pedidos_audio() == 0) {
+    static int ultimo = -1;
+    int passo = (a < 0 ? 0 : a > 100 ? 100 : a) / 25;
+    if (passo != ultimo) { ultimo = passo; printf("[doador] TV player buffering %d%% (no audio segment asked yet)\n", a); fflush(stdout); }
+  }
 }
 
 static void legendaLimpar(int bloquear) {
@@ -1339,6 +1351,7 @@ static void doadorOpcoes(DoaAbrir *o, AudioExtFaixa *h, char *langs, size_t nl) 
 }
 // Opens the donor server's session on `conv` (the converter in video-only
 // mode, already open) and switches the player to it at `pos`.
+static int rendIndice, rendLimite;   // the 4K test row (video_doador_rend_definir)
 static int doadorSessaoV(const char *conv, double pos, const char *motivo, int variante) {
   char url[256], langs[64];
   AudioExtFaixa h;
@@ -1351,6 +1364,7 @@ static int doadorSessaoV(const char *conv, double pos, const char *motivo, int v
   o.audio = doadorTrackAntes >= 0 ? ordinalAudio(doadorTrackAntes) : 0;
   if (o.audio < 0) o.audio = 0;
   o.variante = variante;
+  o.rend_limite = rendLimite;
   doadorOpcoes(&o, &h, langs, sizeof langs);
   doa_definir_casa(ling_casa);
   doadorleg_cancelar();
@@ -1367,6 +1381,21 @@ static int doadorSessaoV(const char *conv, double pos, const char *motivo, int v
   return 1;
 }
 static int doadorSessao(const char *conv, double pos, const char *motivo) { return doadorSessaoV(conv, pos, motivo, 0); }
+// THE 4K TEST ROW (Audio menu, owner 17/11): at most this many audio tracks in
+// the master the TV gets (0 all). Applied with OK: a donor that plays reopens.
+int video_doador_rend_indice(void) { return rendIndice; }
+void video_doador_rend_definir(int indice, int limite) {
+  if (indice < 0 || indice > 2) return;
+  rendIndice = indice; rendLimite = limite > 0 ? limite : 0;
+  printf("[doador] test row: tracks sent to the TV = %s\n", rendLimite == 0 ? "all" : rendLimite == 1 ? "only the chosen one" : "at most 6");
+  fflush(stdout);
+  if (dv.ativo && dv.conv[0]) {
+    char conv[256];
+    double p = cv.jaTocou ? video_pos() : cv.seekPend ? cv.seekAlvo : cv.inicio;
+    snprintf(conv, sizeof conv, "%s", dv.conv);
+    doadorSessaoV(conv, p, "test row: tracks sent to the TV", dv.variante);
+  }
+}
 // The donor could not play (it did not open, the TV never asked for its
 // audio, the player did not prepare): the audio that played before the pick,
 // at the same place. A DTS file's converted track converts again (owner's log
@@ -1979,7 +2008,12 @@ static void convBombear(void) {
     // segment, then sits for 45 s. After 15 s without one: said with what it
     // did ask for, one retry with the master's form 1 (CODECS, BANDWIDTH
     // capped), then the audio that played before the pick.
-    if (dv.ativo && !pronto && !dv.semAudioFeito && (int)(agora - cv.abriuEm) > 15000 && doa_pronto() && doa_pedidos_audio() == 0) {
+    if (dv.ativo && !dv.prontoEm && doa_pronto()) {
+      dv.prontoEm = agora ? agora : 1;
+      printf("[doador] audio server ready %d ms after the open: the start checks count from now\n", (int)(agora - cv.abriuEm));
+      fflush(stdout);
+    }
+    if (dv.ativo && !pronto && !dv.semAudioFeito && dv.prontoEm && (int)(agora - dv.prontoEm) > 15000 && doa_pedidos_audio() == 0) {
       char m[160];
       dv.semAudioFeito = 1;
       snprintf(m, sizeof m, "the TV player asked for no audio segment in 15 s (%d request(s) to the audio server, master form %d)",
@@ -1987,7 +2021,7 @@ static void convBombear(void) {
       doadorSemComecar(m);
       return;
     }
-    if (dv.ativo && !pronto && (int)(agora - cv.abriuEm) > 30000) {
+    if (dv.ativo && !pronto && (int)(agora - (dv.prontoEm ? dv.prontoEm : cv.abriuEm)) > 30000) {
       char m[160];
       snprintf(m, sizeof m, "the TV player did not prepare in 30 s (%d audio request(s), master form %d)", doa_pedidos_audio(), dv.variante);
       doadorSemComecar(m);
@@ -1997,7 +2031,7 @@ static void convBombear(void) {
     // quadro (sonda, NotSupportedAudioCodec) tem abriuEm DEPOIS dele — sem
     // sinal a conta dava 4 bilhoes e desistia na hora (S95C, 16/10: "nao
     // preparou em 45 s" com 0 pedidos ao servidor).
-    if (!pronto && (int)(agora - cv.abriuEm) > 45000) { convDesistir(i18n("o player nao preparou em 45 s")); return; }
+    if (!pronto && (int)(agora - (dv.ativo && dv.prontoEm ? dv.prontoEm : cv.abriuEm)) > 45000) { convDesistir(i18n("o player nao preparou em 45 s")); return; }
   }
   // Troca no meio do filme (HLS): o player abriu do zero, e o seek vai depois
   // do Start, como no recarregar da reconexao.
