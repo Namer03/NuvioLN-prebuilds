@@ -1,7 +1,8 @@
 /* DTS / TrueHD -> Dolby Digital remux for the Samsung .tpk
  * (docs/features/dts/README.md). Video packets are copied untouched; ONE
  * DTS/TrueHD/MLP track is decoded and re-encoded as AC3: 5.1 640 kb/s, or 2.0
- * 192 kb/s for stereo sources and with the "Stereo" setting. (Stereo was AAC
+ * 384 kb/s for stereo sources and with the "Stereo" setting (192 kb/s until
+ * 11/2026; at 192 the encoder merges left and right above ~12.5 kHz). (Stereo was AAC
  * 2.0 until 11/2026: FFmpeg's AAC encoder cost ~10x the AC3 one and a 2020 TV
  * could not keep up; the S95C log showed the same ratio.) Output
  * goes to a writer callback: MPEG-TS segments for HLS, or one progressive

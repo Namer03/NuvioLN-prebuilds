@@ -540,7 +540,9 @@ int dts_remux_probe(DtsRemux *r, const char *url, const char *headers, int ordin
     int ic2 = in->in_channels;
     in->out_channels = stereo ? 2 : ic2 == 1 ? 1 : ic2 == 2 ? 2 : 6;
     snprintf(in->out_codec, sizeof in->out_codec, "%s", "ac3");
-    in->out_bitrate = in->out_channels > 2 ? 640000 : in->out_channels == 2 ? 192000 : 96000;
+    /* 2.0 at 384 kb/s: at 192 FFmpeg's AC3 encoder couples L and R above ~12.5 kHz
+     * (ac3enc.c coupling table); from 320 up it keeps them apart. Same CPU. */
+    in->out_bitrate = in->out_channels > 2 ? 640000 : in->out_channels == 2 ? 384000 : 96000;
     if (A->codecpar->codec_id == AV_CODEC_ID_DTS) snprintf(in->decoder_path, sizeof in->decoder_path, "DTS core only");
     else if (ic2 > in->out_channels || ic2 == 0)
       snprintf(in->decoder_path, sizeof in->decoder_path, "TrueHD %s presentation", in->out_channels == 6 ? "5.1" : "2.0");

@@ -73,7 +73,7 @@ The Samsung build converts with its own path: the TV's `Tizen.Multimedia.Player`
 reads the converted stream from a local HTTP server inside the app
 (`src/dts/dts_hls_tpk.c`; converter `src/dts/dts_remux.c`). Video is copied byte
 for byte; DTS decodes the core, TrueHD its 5.1 presentation, output AC3 5.1 at
-640 kb/s (stereo sources 2.0), or Dolby Digital 2.0 192 kb/s with the Stereo setting
+640 kb/s (stereo sources 2.0), or Dolby Digital 2.0 384 kb/s with the Stereo setting
 (AAC 2.0 until 11/2026; its encoder cost ~10x the AC3 one, too much for a 2020 TV). Settings has
 one row on the .tpk: Off / 5.1 / Stereo (`dtsTpkLocal`).
 
