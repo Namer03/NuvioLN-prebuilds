@@ -1054,7 +1054,7 @@ int dts_tpk_abrir(const char *url, const char *headers, int track, int stereo, i
   id = s->id;   // s may go once G is released (a close from another thread)
   pthread_mutex_unlock(&G);
   printf("[dts-tpk] sessao %u: %s em 127.0.0.1, audio %d do arquivo, saida %s; player abre %s; segmentos de %.0f s\n",
-         id, MODO_NOME[modo], track, stereo ? "AAC 2.0" : "AC3",
+         id, MODO_NOME[modo], track, stereo ? "AC3 2.0" : "AC3",
          strstr(out, ".m3u8") ? "a playlist HLS" : "o fluxo progressivo", SEG_ALVO_S);
   fflush(stdout);
   return 1;

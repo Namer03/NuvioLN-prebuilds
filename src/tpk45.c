@@ -1,4 +1,4 @@
-// Tizen 4-5.5 .tpk: memoria da conversao e das miniaturas + linhas de teste
+// Tizen 4-5.5 .tpk: memoria da conversao + linhas de teste
 // do menu de audio. Contrato em tpk45.h.
 #include "tpk45.h"
 #include <stdio.h>
@@ -15,10 +15,6 @@ const char *tpk45_marca(void) { return ""; }
 int tpk45_anel_mib(void) { return 0; }
 int tpk45_fila_mib(void) { return 0; }
 int tpk45_aperto(long livreKb, int *apertado) { (void)livreKb; (void)apertado; return 0; }
-long tpk45_mini_piso_kb(void) { return 0; }
-int tpk45_mini_altura_max(void) { return 0; }
-int tpk45_mini_espera_conversor(void) { return 0; }
-void tpk45_mini_estado(int feitas, int total, int pausa) { (void)feitas; (void)total; (void)pausa; }
 int tpk45_linhas(void) { return 0; }
 void tpk45_rotulo(int linha, char *nome, size_t tn, char *sub, size_t ts) {
   (void)linha;
@@ -67,7 +63,7 @@ __attribute__((visibility("hidden"))) int fcntl64(int fd, int cmd, ...) {
 #define ARQ "tpk45-teste.txt"
 
 // Os tres perfis. "Normal" e o que as TVs Tizen 6-7 ja usam (dts_hls_tpk.c:
-// anel 16 MiB, fila 128 MiB) e o piso de 150 MB das miniaturas. O anel aceita
+// anel 16 MiB, fila 128 MiB). O anel aceita
 // 8..32 MiB e a fila 32..512 MiB (dts_engine.c, dts_remux.c).
 // O ANEL e a memoria de verdade (um por leitor vivo, ate tres). A FILA e so um
 // teto: no uso normal ela guarda poucos MB (o intervalo entre audio e video no
@@ -76,20 +72,17 @@ __attribute__((visibility("hidden"))) int fcntl64(int fd, int cmd, ...) {
 static const struct {
   const char *nome;
   int anel, fila;        // conversor, MiB
-  long miniPisoMb;       // miniaturas: piso de MemAvailable
-  int miniAltura;        // 0 = qualquer; senao so ate esta altura de video
-  int miniEspera;        // esperam enquanto o conversor trabalha
 } P[TPK45_PERFIS] = {
-  [TPK45_PERFIL_AUTO]   = { "auto",    0,   0,   0,    0, 0 },
-  [TPK45_PERFIL_NORMAL] = { "normal", 16, 128, 150,    0, 0 },
-  [TPK45_PERFIL_LEVE]   = { "light",   8,  96, 150,    0, 1 },
-  [TPK45_PERFIL_MINIMO] = { "minimum", 8,  64, 200, 1152, 1 },
+  [TPK45_PERFIL_AUTO]   = { "auto",    0,   0 },
+  [TPK45_PERFIL_NORMAL] = { "normal", 16, 128 },
+  [TPK45_PERFIL_LEVE]   = { "light",   8,  96 },
+  [TPK45_PERFIL_MINIMO] = { "minimum", 8,  64 },
 };
 static const char *const E[TPK45_ENTREGAS] = { "auto", "HLS only", "continuous TS only" };
 
-// AUTO pela memoria LIVRE (MemAvailable) de agora. Na S95C o conversor mais as
-// miniaturas rodaram bem com 201-375 MB livres e valores maiores que "normal";
-// aqui a escada desce antes, porque ninguem mediu uma TV de 2018-2020.
+// AUTO pela memoria LIVRE (MemAvailable) de agora. Na S95C o conversor rodou
+// bem com 201-375 MB livres e valores maiores que "normal"; aqui a escada desce
+// antes. A TV de 2020 do primeiro teste (1337 MB) ficou em 300-460 MB livres.
 #define AUTO_NORMAL_MB 400
 #define AUTO_LEVE_MB   250
 // Aperto: o piso do app (memlog.h, 150 MB); sai dele com folga para nao oscilar.
@@ -99,7 +92,6 @@ static const char *const E[TPK45_ENTREGAS] = { "auto", "HLS only", "continuous T
 static atomic_int perfil = TPK45_PERFIL_AUTO, entrega = TPK45_ENTREGA_AUTO;
 static atomic_int lido;
 static Uint32 mudouEm;          // 0 = nada pendente (so o fio do desenho mexe)
-static atomic_int miniFeitas, miniTotal, miniPausa = 3;
 
 static long lerKb(const char *arq, const char *chave) {
   char l[160];
@@ -135,7 +127,7 @@ int tpk45_ativo(void) { return 1; }
 int tpk45_perfil(void) { ler(); return atomic_load(&perfil); }
 int tpk45_entrega(void) { ler(); return atomic_load(&entrega); }
 
-// O Auto resolvido. A leitura vale 5 s: quem pergunta por quadro (miniaturas)
+// O Auto resolvido. A leitura vale 5 s: quem pergunta muitas vezes (o menu)
 // nao reabre o /proc a cada vez, e o perfil nao troca no meio de uma conta.
 int tpk45_perfil_efetivo(void) {
   static atomic_int cache = TPK45_PERFIL_LEVE;
@@ -154,7 +146,7 @@ int tpk45_perfil_efetivo(void) {
 }
 
 // Todas as combinacoes montadas uma vez: o ponteiro devolvido vale para sempre,
-// em qualquer fio (o fio da memoria e o das miniaturas tambem logam com ele).
+// em qualquer fio (o fio da memoria do conversor tambem loga com ele).
 static char marcas[TPK45_PERFIS][TPK45_PERFIS][TPK45_ENTREGAS][64];
 static pthread_once_t marcasUma = PTHREAD_ONCE_INIT;
 static void marcasMontar(void) {
@@ -178,14 +170,6 @@ int tpk45_aperto(long livreKb, int *apertado) {
   return 0;
 }
 
-long tpk45_mini_piso_kb(void) { return P[tpk45_perfil_efetivo()].miniPisoMb * 1024L; }
-int tpk45_mini_altura_max(void) { return P[tpk45_perfil_efetivo()].miniAltura; }
-int tpk45_mini_espera_conversor(void) { return P[tpk45_perfil_efetivo()].miniEspera; }
-void tpk45_mini_estado(int feitas, int total, int pausa) {
-  if (feitas >= 0) atomic_store(&miniFeitas, feitas);
-  if (total >= 0) atomic_store(&miniTotal, total);
-  atomic_store(&miniPausa, pausa);
-}
 
 // --- linhas de teste do menu de audio ----------------------------------------
 int tpk45_linhas(void) { return 3; }
@@ -205,8 +189,7 @@ void tpk45_rotulo(int linha, char *nome, size_t tn, char *sub, size_t ts) {
     Uint32 agora = SDL_GetTicks();
     if (!em || (Sint32)(agora - em) >= 1000) {
       long rss = lerKb("/proc/self/status", "VmRSS");
-      snprintf(texto, sizeof texto, "free %ld MB, app %ld MB, thumbnails %d of %d", livreMb(), rss < 0 ? -1 : rss / 1024,
-               atomic_load(&miniFeitas), atomic_load(&miniTotal));
+      snprintf(texto, sizeof texto, "free %ld MB, app %ld MB", livreMb(), rss < 0 ? -1 : rss / 1024);
       em = agora ? agora : 1u;
     }
     snprintf(nome, tn, "Memory now");
@@ -271,32 +254,27 @@ void tpk45_tv(void) {
   printf("[tpk45] tv: tizen %s, model %s, build %s, RAM %ld MB, free %ld MB, %ld core(s), library by %s, FFmpeg %s; %s\n",
          ver, modelo, build, lerKb("/proc/meminfo", "MemTotal") / 1024, livreMb(), sysconf(_SC_NPROCESSORS_ONLN),
          carregador(), dts_remux_available() ? "linked" : "missing", tpk45_marca());
-  printf("[tpk45] profiles: normal ring 16 queue cap 128 MiB, thumbnails floor 150 MB | light 8 / 96, thumbnails wait for "
-         "the converter | minimum 8 / 64, thumbnails floor 200 MB, up to 1080p, wait | auto: free >= %d MB normal, >= %d MB "
-         "light, else minimum | low-memory line under %d MB free\n",
+  printf("[tpk45] profiles: normal ring 16 queue cap 128 MiB | light 8 / 96 | minimum 8 / 64 | auto: free >= %d MB normal, "
+         ">= %d MB light, else minimum | low-memory line under %d MB free | no seek-bar thumbnails on Tizen 4/5\n",
          AUTO_NORMAL_MB, AUTO_LEVE_MB, APERTO_MB);
   fflush(stdout);
 }
 void tpk45_tick(int convertendo, const char *modo) {
   static Uint32 ultimo;
-  static const char *const PAUSA[4] = { "working", "waiting for memory", "waiting for the converter", "idle" };
   Uint32 agora = SDL_GetTicks();
   DtsEngineRings rg;
   long rss, swap;
-  int pausa;
   if (ultimo && (Sint32)(agora - ultimo) < 10000) return;
   ultimo = agora ? agora : 1u;
   tpk45_tv();
   rss = lerKb("/proc/self/status", "VmRSS");
   swap = lerKb("/proc/meminfo", "SwapFree");
   dts_engine_rings(&rg, 0);
-  pausa = atomic_load(&miniPausa);
   printf("[tpk45] 10s: free %ld MB, swap free %ld MB, app %ld MB; converter %s%s%s, rings %d = %lld MiB, queue %lld of %d MiB; "
-         "thumbnails %d of %d, %s; %s\n",
+         "%s\n",
          livreMb(), swap < 0 ? -1 : swap / 1024, rss < 0 ? -1 : rss / 1024,
          convertendo ? "on" : "off", convertendo && modo ? ", " : "", convertendo && modo ? modo : "",
-         rg.alive, rg.bytes >> 20, (long long)(dts_remux_queued_bytes() >> 20), dts_remux_queue_budget_mib(),
-         atomic_load(&miniFeitas), atomic_load(&miniTotal), PAUSA[pausa >= 0 && pausa < 4 ? pausa : 3], tpk45_marca());
+         rg.alive, rg.bytes >> 20, (long long)(dts_remux_queued_bytes() >> 20), dts_remux_queue_budget_mib(), tpk45_marca());
   fflush(stdout);
 }
 #endif

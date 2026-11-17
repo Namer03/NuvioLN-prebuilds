@@ -1064,9 +1064,10 @@ static const MkvFaixa *mkvTrack(int numero) {
   return NULL;
 }
 
-// "Dolby Digital 5.1" / "2.0" / "AAC 2.0": o que sai para a TV.
+// "Dolby Digital 5.1" / "2.0": o que sai para a TV. "Estereo" tambem e Dolby
+// Digital (AC3 2.0) desde 11/2026; antes era AAC 2.0 (dts_remux.h).
 static const char *saidaRotulo(int canais) {
-  if (!ajustes_dts_ac3()) return "AAC 2.0";
+  if (!ajustes_dts_ac3()) return "Dolby Digital 2.0";
   return canais == 1 ? "Dolby Digital 1.0" : canais == 2 ? "Dolby Digital 2.0" : "Dolby Digital 5.1";
 }
 
@@ -1203,25 +1204,42 @@ static int convAbrirSessao(int ordinal, int modo, double pos, char *url, size_t 
 
 static int modoProg(int modo) { return modo == DTSTPK_PROG_TS; }
 
+// O video do arquivo (codec do MKV, "?" sem cabecalho): a recusa do HLS e
+// lembrada por ele.
+static const char *codecVideoMkv(void) {
+  for (int i = 0; i < mkvN; i++) if (mkvFx[i].tipo == 1) return mkvFx[i].codec;
+  return "?";
+}
+// Codecs de video cujo HLS o player recusou nesta execucao (Tizen 4/5, entrega
+// Auto). POR CODEC desde o log 1 do testador (11/2026): uma recusa de HEVC
+// mandava todo H.264 seguinte para o TS continuo (1o quadro 21.8 s, cada seek
+// um fluxo novo), e H.264 tocava bem em HLS.
+#define HLS_RECUSAS 4
+static char hlsRecusou[HLS_RECUSAS][32];
+static int hlsRecusadoNeste(void) {
+  const char *c = codecVideoMkv();
+  for (int i = 0; i < HLS_RECUSAS; i++) if (hlsRecusou[i][0] && !strcmp(hlsRecusou[i], c)) return 1;
+  return 0;
+}
+static void hlsMarcarRecusa(void) {
+  const char *c = codecVideoMkv();
+  if (hlsRecusadoNeste()) return;
+  for (int i = 0; i < HLS_RECUSAS; i++)
+    if (!hlsRecusou[i][0]) { snprintf(hlsRecusou[i], sizeof hlsRecusou[i], "%s", c); return; }
+  memmove(hlsRecusou[0], hlsRecusou[1], sizeof hlsRecusou[0] * (HLS_RECUSAS - 1));   // cheio: sai o mais velho
+  snprintf(hlsRecusou[HLS_RECUSAS - 1], sizeof hlsRecusou[0], "%s", c);
+}
 // Modo em que uma conversao NOVA abre. Nos hosts 6+ e o do ajuste (HLS). No
 // Tizen 4/5 (tpk45.h) a entrega escolhe: so HLS, so TS continuo, ou Auto = HLS
-// ate o player recusar uma vez nesta execucao do app. Motivo: fora do app nao
-// ha quem tenha visto HEVC dentro de HLS tocar no player dessas TVs, e a
-// maioria dos remux com DTS e HEVC.
-static int hlsRecusado;
+// ate o player recusar o HLS para este codec de video nesta execucao do app.
 static int modoDeAbrir(void) {
   int m = ajustes_dts_tpk_modo();
   if (m == DTSTPK_DESLIGADO || !tpk45_ativo()) return m;
   switch (tpk45_entrega()) {
     case TPK45_ENTREGA_CONTINUO: return DTSTPK_PROG_TS;
     case TPK45_ENTREGA_HLS: return DTSTPK_HLS;
-    default: return hlsRecusado ? DTSTPK_PROG_TS : DTSTPK_HLS;
+    default: return hlsRecusadoNeste() ? DTSTPK_PROG_TS : DTSTPK_HLS;
   }
-}
-// O video do arquivo, para o log (a recusa do HLS pode depender do codec).
-static const char *codecVideoMkv(void) {
-  for (int i = 0; i < mkvN; i++) if (mkvFx[i].tipo == 1) return mkvFx[i].codec;
-  return "?";
 }
 
 // Outro player no meio de uma fonte que ja tocou: o app ve um seek ate o
@@ -1271,7 +1289,7 @@ static int convIniciar(int track, double pos, const char *motivo) {
          nomeModo(modo), saidaRotulo(m ? m->canais : 6), motivo);
   if (tpk45_ativo())
     printf("[dts-tpk] 4/5: video of the file %s; opening as %s (%s%s)\n", codecVideoMkv(), nomeModo(modo), tpk45_marca(),
-           hlsRecusado ? "; the player refused HLS earlier in this run" : "");
+           hlsRecusadoNeste() ? "; the player refused HLS for this video codec earlier in this run" : "");
   fflush(stdout);
   convTrocar(track, modo, pos, url);
   return 1;
@@ -1312,9 +1330,10 @@ static int hlsPodeRecuar(void) {
 }
 static int hlsRecuar(const char *porque) {
   if (!hlsPodeRecuar()) return 0;
-  hlsRecusado = 1;
+  hlsMarcarRecusa();
   printf("[dts-tpk] 4/5: the player did not take the HLS stream (%s; video of the file %s; picture %dx%d; what it asked the "
-         "server is in the session summary below): one retry as continuous TS, and the next conversions of this run open in it\n",
+         "server is in the session summary below): one retry as continuous TS, and the next conversions of this run with "
+         "this video codec open in it\n",
          porque, codecVideoMkv(), largura, altura);
   fflush(stdout);
   convRefazerProgPor(porque);
@@ -1773,7 +1792,7 @@ static void tpk45Vigiar(void) {
   if (!tpk45_ativo() || !ativo) return;
   tpk45_tick(cv.ativo, cv.ativo ? nomeModo(cv.modo) : NULL);
   if (!tpk45_mudanca_assentou()) return;
-  hlsRecusado = 0;   // entrega mexida: o Auto tenta o HLS de novo,
+  memset(hlsRecusou, 0, sizeof hlsRecusou);   // entrega mexida: o Auto tenta o HLS de novo,
   cv.refezProg = 0;  // tambem nesta fonte (sem indice, o conversor volta sozinho ao TS continuo)
   if (cv.ativo && cv.track > 0 && cv.jaTocou && !cv.reabrindo && !parado && convPossivel()) {
     printf("[dts-tpk] 4/5: test menu changed (%s): reopening this conversion at %.1f s\n", tpk45_marca(), posReal());

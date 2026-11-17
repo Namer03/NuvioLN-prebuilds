@@ -1,14 +1,13 @@
 // Tizen 4-5.5 .tpk (NuvioTpk40, TVs de 2018-2020): memoria da conversao
-// DTS/TrueHD e das miniaturas feitas na TV, mais as linhas de TESTE do menu de
-// audio do player.
+// DTS/TrueHD, mais as linhas de TESTE do menu de audio do player. (As
+// miniaturas feitas na TV nao rodam no 4/5: miniatura.c, logs de 11/2026.)
 //
 // Estas TVs tem menos RAM que a S95C onde tudo foi medido (registro 8825: 1108
 // MB no total), e ninguem mediu quanto sobra livre nelas. Por isso:
 //  - SEGURANCA (fica): o conversor abre com valores tirados da memoria LIVRE de
-//    agora, nao so da versao da Tizen, e as miniaturas esperam por ele nas TVs
-//    apertadas. O resto e o que todo aparelho ja tem: o vigia do app
-//    (memlog.h: abaixo de 150 MB livres solta texturas, caches e heap) e o
-//    portao das miniaturas (piso + custo medido antes de cada quadro).
+//    agora, nao so da versao da Tizen. O resto e o que todo aparelho ja tem: o
+//    vigia do app (memlog.h: abaixo de 150 MB livres solta texturas, caches e
+//    heap).
 //  - TESTE (sai antes do PR): a pessoa escolhe o perfil e a entrega no menu de
 //    audio do player, e cada linha do log diz com qual rodou.
 //
@@ -37,15 +36,6 @@ int tpk45_fila_mib(void);
 // So AVISA: o teto da fila e erro fatal do conversor, nao um freio, entao
 // baixa-lo com a conversao em curso derrubaria o som em vez de poupar memoria.
 int tpk45_aperto(long livreKb, int *apertado);
-
-// Miniaturas: piso de MemAvailable (KB), altura maxima do video (0 = sem
-// limite) e se esperam enquanto o conversor trabalha.
-long tpk45_mini_piso_kb(void);
-int  tpk45_mini_altura_max(void);
-int  tpk45_mini_espera_conversor(void);
-// O fio das miniaturas conta o que fez (para a linha de 10 s): feitas, total,
-// pausa (0 fazendo, 1 memoria, 2 conversor, 3 parado/sem titulo).
-void tpk45_mini_estado(int feitas, int total, int pausa);
 
 // LINHAS DE TESTE no menu de audio do player (faixas.c), depois das faixas.
 int  tpk45_linhas(void);
