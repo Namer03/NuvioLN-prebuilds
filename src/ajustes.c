@@ -9289,7 +9289,9 @@ static void ffVoltar(void) {
 // EA_ADDONS: the "Addons" row (audioextaddons.h), a list of its own (eaSub)
 // with the add-ons whose versions the audio pages list, per profile.
 #define EA_ADDONS (-1)
-static const int EA_OPS[] = { AJ_EXT_AUDIO, AJ_EXT_AUDIO_AUTO, AJ_EXT_AUDIO_SEGUIR, AJ_EXT_AUDIO_AVISO, AJ_EXT_AUDIO_SERIE, AJ_EXT_AUDIO_MODO,
+// AJ_EXT_AUDIO_AUTO is no longer a row (owner 17/11): the sync is always
+// automatic (the subtitle match, then the audio refine). Its slot stays.
+static const int EA_OPS[] = { AJ_EXT_AUDIO, AJ_EXT_AUDIO_SEGUIR, AJ_EXT_AUDIO_AVISO, AJ_EXT_AUDIO_SERIE, AJ_EXT_AUDIO_MODO,
                               AJ_EXT_AUDIO_CACHE, AJ_EXT_AUDIO_COPIAS, AJ_EXT_AUDIO_ORDEM, EA_ADDONS, AJ_EXT_AUDIO_PASSO, AJ_EXT_AUDIO_BUFOR, AJ_EXT_AUDIO_GRANDE };
 #define EA_N ((int)(sizeof EA_OPS / sizeof *EA_OPS))
 static int eaFoco, eaSub, eaAddFoco, eaAddN;

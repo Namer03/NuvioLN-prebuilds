@@ -51,6 +51,8 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq libsdl2-dev >/dev/null
           bash tests/audioext.sh
+          bash tests/doadorleg.sh
+          bash tests/mkvass_ordem.sh
 
       # tools/tpk.sh compiles libnuvio.so inside a linux/arm/v5 container.
       - name: Enable ARM emulation for Docker

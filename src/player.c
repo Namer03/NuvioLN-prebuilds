@@ -4361,24 +4361,9 @@ void player_evento(const SDL_Event *e) {
     }
   }
 
-  // TEST BUILD, AUDIO FROM ANOTHER SOURCE (audioext.h): while it plays, CH+/CH-
-  // (PgUp/PgDn) move that audio later/earlier (faster while held). The
-  // converter applies the latest offset shortly after the last press (video.c), live.
-  if (!ehCanal() && audioext_tocando()) {
-    static int chRep;
-    int sc = e->key.keysym.scancode, d = 0;
-    chRep = e->key.repeat ? chRep + 1 : 0;   // held: the step grows (100 ms, 1 s, 10 s)
-    if (sc == NV_SCANCODE_CH_UP || k == SDLK_PAGEUP) d = audioext_passo(ajustes_audio_externo_passo(), chRep);
-    else if (sc == NV_SCANCODE_CH_DOWN || k == SDLK_PAGEDOWN) d = -audioext_passo(ajustes_audio_externo_passo(), chRep);
-    if (d) {
-      char t[64];
-      char v[24];
-      audioext_formatar_offset(audioext_offset_somar(d), v, sizeof v, i18n("%c%u.%03u s"), i18n("%c%u min %u.%03u s"));
-      snprintf(t, sizeof t, i18n("Audio sync: %s"), v);
-      player_toast(t, 1800);
-      return;
-    }
-  }
+  // AUDIO FROM ANOTHER SOURCE: no CH+/CH- sync any more (owner 17/11). The
+  // sync is automatic (subtitles, then audio) and the audio menu's Audio sync
+  // row sets it by hand.
 
   // PAINEL DE PAUSA: com ele de pe, a tecla e DELE. Vem antes de tudo o que
   // sobra (inclusive da tecla de proporcao) porque e o que o web faz — la o
@@ -4620,36 +4605,38 @@ void player_atualizar(float dt, Uint32 agora) {
       } else if (a > 0 && !d.automatico) { snprintf(t, sizeof t, i18n("Matched automatically: %s"), v); player_toast(t, 4000); }
       /* a > 0 && automatico: the match at start (Settings) set it quietly; only a failure is said (owner, 08/11). */
       /* ...unless the offset is the series memory's (owner, 11/11): kept, nothing to say. */
+      /* The audio refine (como 7) after the subtitles placed it: not sure = the subtitles' offset stays, quietly. */
+      else if (a < 0 && d.como == 7) { printf("[ext-audio] audio refine not sure: the subtitles' offset stays\n"); fflush(stdout); }
       else if (a < 0 && d.automatico && audioext_offset_lembrado()) {
         printf("[ext-audio] automatic match not sure: the series memory's offset stays\n"); fflush(stdout); }
       else if (a < 0 && (d.nkand || d.dica_ms))
         player_toast_ex(i18n("Could not match for sure: try the candidates in Audio sync (audio menu, OK on Audio sync)."), 7000, "aj_triangle-alert", 1);
       else if (a < 0 && d.pesado)
         player_toast_ex(i18n("Could not match automatically: a wider search would download too much of the other version. Set the sync by hand in the audio menu."), 7000, "aj_triangle-alert", 1);
-      else if (a < 0) player_toast_ex(i18n("Could not match automatically: use the manual sync (CH+/CH-)."), 5000, "aj_triangle-alert", 1); }
+      else if (a < 0) player_toast_ex(i18n("Could not sync this version by itself: set it in the audio menu (Audio sync)."), 5000, "aj_triangle-alert", 1); }
     { int ms, a = audioext_seguir_aviso_consumir(&ms);
       char v[48];
       audioext_formatar_offset(ms, v, sizeof v, i18n("%c%u.%03u s"), i18n("%c%u min %u.%03u s"));
       if (a == 1) player_toast(i18n("A scene the other version does not have: this file's own audio plays."), 4000);
       else if (a == 2) { snprintf(t, sizeof t, i18n("The other version's audio is back (%s)."), v); player_toast(t, 3500); }
-      else if (a == 3) player_toast_ex(i18n("Lost the other version: use Match automatically in the audio menu."), 6000, "aj_triangle-alert", 1);
+      else if (a == 3) player_toast_ex(i18n("Lost the other version's sync: set it in the audio menu (Audio sync)."), 6000, "aj_triangle-alert", 1);
       else if (a == 4 && ajustes_audio_externo_aviso()) {   // Settings: the message can be hidden (the fix still happens)
         snprintf(t, sizeof t, i18n("Audio sync adjusted by itself (%s)."), v); player_toast(t, 3000); } }
     if (audioext_reconexao_consumir())
       player_toast(i18n("The source slowed down: reconnecting…"), 3500);
     { int l = audioext_lento_consumir();
       if (l == 1) player_toast(i18n("The other version downloads slowly: opening it again…"), 3500);
-      else if (l == 2) player_toast_ex(i18n("This version downloads too slowly. Pick another one in the audio menu (From another source)."), 7000, "aj_triangle-alert", 1);
+      else if (l == 2) player_toast_ex(i18n("This version downloads too slowly. Pick another one in the audio menu."), 7000, "aj_triangle-alert", 1);
       else if (l == 3) player_toast_ex(i18n("This version doesn't respond. Pick another one in the audio menu."), 7000, "aj_triangle-alert", 1); }
     if (audioext_voltou_padrao_consumir())
       player_toast(i18n("The other version's audio did not start last time. Playing this file's own audio."), 5000);
     if (audioext_tocando() && !extVisto) {
-      snprintf(t, sizeof t, i18n("Audio from: %s · CH+/CH- to sync"), audioext_nome());
+      snprintf(t, sizeof t, i18n("Audio from: %s"), audioext_nome());
       player_toast(t, 4000);
     }
     { int corte, vel;
       if (audioext_diferenca_consumir(&corte, &vel)) {
-        if (vel) snprintf(t, sizeof t, "%s", i18n("This version plays at another speed: Match automatically (audio menu) corrects it."));
+        if (vel) snprintf(t, sizeof t, "%s", i18n("This version plays at another speed: the sync corrects it."));
         else snprintf(t, sizeof t, i18n(corte > 0 ? "This version is %d s longer (another cut): the sync may drift."
                                                   : "This version is %d s shorter (another cut): the sync may drift."),
                       corte > 0 ? corte : -corte);

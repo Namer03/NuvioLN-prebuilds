@@ -33,6 +33,12 @@ int  doa_dopasuj_resultado(DoaDopasuj *o, int *a) { (void)o; (void)a; return 0; 
 int  doa_dopasuj_ativo(void) { return 0; }
 int  doa_doador_saude(int *l) { if (l) *l = 0; return 0; }
 int  doa_seguir_evento(int *ms) { (void)ms; return 0; }
+int  doa_pedidos_audio(void) { return 0; }
+int  doa_pedidos(void) { return 0; }
+int  doa_legendas(int f, DoaLegInfo *o, int m) { (void)f; (void)o; (void)m; return 0; }
+int  doa_legenda_tempos(int f, int k, double *t, int m) { (void)f; (void)k; (void)t; (void)m; return 0; }
+void doa_aplicar_legendas(double k, double d) { (void)k; (void)d; }
+void doa_dopasuj_fino(void) {}
 #else
 
 #include "dts_engine.h"
@@ -80,6 +86,7 @@ int  doa_seguir_evento(int *ms) { (void)ms; return 0; }
 #define SK_IPS 24
 static pthread_mutex_t skTrava = PTHREAD_MUTEX_INITIALIZER;
 static unsigned skIp[SK_IPS];
+static int skIpUrl[SK_IPS];          // which watched URL (0-3) the address came from (subtitle-rewrite 9c62d57)
 static int skN = -1;
 static char *skUrl[4];
 static void skHost(const char *u, char *h, size_t n) {
@@ -93,6 +100,7 @@ static void skHost(const char *u, char *h, size_t n) {
 }
 static void *skResolver(void *u) {
   unsigned ip[SK_IPS];
+  int ipUrl[SK_IPS];
   char hosts[4][256];
   int n = 0, i, j;
   (void)u;
@@ -109,12 +117,12 @@ static void *skResolver(void *u) {
     for (a = r; a && n < SK_IPS; a = a->ai_next) {
       unsigned v = ((struct sockaddr_in *)a->ai_addr)->sin_addr.s_addr;
       for (j = 0; j < n; j++) if (ip[j] == v) break;
-      if (j == n) ip[n++] = v;
+      if (j == n) { ipUrl[n] = i; ip[n++] = v; }
     }
     freeaddrinfo(r);
   }
   pthread_mutex_lock(&skTrava);
-  memcpy(skIp, ip, sizeof ip); skN = n;
+  memcpy(skIp, ip, sizeof ip); memcpy(skIpUrl, ipUrl, sizeof ipUrl); skN = n;
   pthread_mutex_unlock(&skTrava);
   printf("[doador] sockets: watching %d address(es) of the files' hosts\n", n);
   fflush(stdout);
@@ -148,7 +156,8 @@ static int skMeus(unsigned long *v, int max) {
   closedir(d);
   return n;
 }
-static int skArquivo(const char *nome, const unsigned *ip, int nIp, const unsigned long *meus, int nMeus, int *eu) {
+static int skArquivo(const char *nome, const unsigned *ip, const int *ipUrl, int nIp, const unsigned long *meus, int nMeus,
+                     int *eu, int *por) {
   FILE *f = fopen(nome, "r");
   char l[512];
   int tot = 0;
@@ -171,23 +180,26 @@ static int skArquivo(const char *nome, const unsigned *ip, int nIp, const unsign
     for (i = 0; i < nIp; i++) if (ip[i] == v) { ok = 1; break; }
     if (!ok) continue;
     tot++;
-    for (i = 0; i < nMeus; i++) if (meus[i] == ino) { (*eu)++; break; }
+    { int u = ipUrl[i], k;
+      for (k = 0; k < nMeus; k++) if (meus[k] == ino) { (*eu)++; if (por && u >= 0 && u < 4) por[u]++; break; } }
   }
   fclose(f);
   return tot;
 }
-static int skContar(int *nuvio) {
+static int skContar(int *nuvio, int por[4]) {
   unsigned ip[SK_IPS];
+  int ipUrl[SK_IPS];
   unsigned long meus[256];
   int n, nm, a, b, eu = 0;
   if (nuvio) *nuvio = -1;
+  if (por) memset(por, 0, 4 * sizeof *por);
   pthread_mutex_lock(&skTrava);
-  n = skN; if (n > 0) memcpy(ip, skIp, sizeof ip);
+  n = skN; if (n > 0) { memcpy(ip, skIp, sizeof ip); memcpy(ipUrl, skIpUrl, sizeof ipUrl); }
   pthread_mutex_unlock(&skTrava);
   if (n <= 0) return -1;
   nm = skMeus(meus, 256);
-  a = skArquivo("/proc/net/tcp", ip, n, meus, nm > 0 ? nm : 0, &eu);
-  b = skArquivo("/proc/net/tcp6", ip, n, meus, nm > 0 ? nm : 0, &eu);
+  a = skArquivo("/proc/net/tcp", ip, ipUrl, n, meus, nm > 0 ? nm : 0, &eu, por);
+  b = skArquivo("/proc/net/tcp6", ip, ipUrl, n, meus, nm > 0 ? nm : 0, &eu, por);
   if (a < 0 && b < 0) return -1;
   if (nuvio) *nuvio = nm >= 0 ? eu : -1;
   return (a > 0 ? a : 0) + (b > 0 ? b : 0);
@@ -218,6 +230,10 @@ typedef struct {
   int falhou; char motivo[160];
   long nSoltas, nVoltas;               // connections given back, connections taken again
   double msVolta;                      // last reconnection: request to its segment out
+  // Its embedded TEXT subtitle tracks as the index (Cues) lists them: the
+  // start of every indexed block, in its own time. Read from the seek index
+  // prepFonte already loads: no byte more (the subtitle match, doadorleg.c).
+  DoaLegInfo leg[DOA_LEG_MAX]; double *legT[DOA_LEG_MAX]; int nLeg;
 } Fonte;
 
 typedef struct { AVPacket *p; double t; } Item;   // t: the playing file's time (s) of the packet
@@ -235,6 +251,9 @@ typedef struct Sessao {
   pthread_mutex_t m;                   // state below
   pthread_cond_t c;
   int pronto, falhou, flacConv, audio;   // audio: index in fx[]
+  int variante;                        // DoaAbrir.variante: 1 = CODECS + capped BANDWIDTH on the master (4K test)
+  atomic_int pedAudio, pedVideo, pedTotal;   // requests seen: audio segments/inits, the master, everything
+  double abertoMs;                     // when doa_abrir opened it (request log)
   char motivo[160], tok[40];
   char *video;                         // the local converter's media playlist (absolute URL)
   Fonte fo[TBA_FONTES]; int nfo;
@@ -248,6 +267,7 @@ typedef struct Sessao {
   // automatic match (mm guards the sides while a tap feeds them)
   pthread_mutex_t mm;
   int mEstado, mAuto, mNovo;           // 0 idle, 1 running, 2 found, 3 not found; mNovo: a result not taken yet
+  int mFino;                           // the running match only refines (+-1 s around the offset, no wide search)
   int mArmD;                           // the donor's generator feeds mDon
   Lado mArq, mDon;
   DtsEngine *mEng;                     // a wide search's own reader (cancelled on close)
@@ -263,6 +283,7 @@ typedef struct Sessao {
   double dur;                          // the playlist's length: the file's container end
   double *aIni; int naSeg;             // audio segments (AUD_SEG_S)
   long banda; int largura, altura; long fps1000; char faixaVideo[8];   // the master's STREAM-INF
+  char vCodecs[40];                    // the video's RFC 6381 name (the master's form 1), "" unknown
   Faixa fx[TBA_FAIXAS]; int nfx;
   // generator (gm)
   pthread_mutex_t gm;
@@ -279,6 +300,12 @@ typedef struct Sessao {
   AVFrame *fr, *ef;
   int64_t base48, amostras;
   int eof;
+  // Laced frames (subtitle-rewrite cde2770): the reading track's next
+  // timestamp; packets that came without one follow it. Reset on every seek.
+  int64_t proxPts;
+  int semPts, semPtsLog;               // packets without a timestamp filled in / lines logged
+  long lidos, guardados;               // this segment: packets read from the source / of the track
+  int diagLog;                         // FLAC/Opus segment lines logged (first 3)
   // log
   long nSeg, nErro, nLarg; long long bytes; double msLer;
   char ultErro[160];
@@ -400,6 +427,7 @@ static void soltar(Sessao *s) {
   { int k; for (k = 0; k < TBA_FONTES; k++) {
       if (s->fo[k].eng) { dts_engine_cancel(s->fo[k].eng); dts_engine_destroy(s->fo[k].eng); }
       free(s->fo[k].url); free(s->fo[k].cab);
+      { int j; for (j = 0; j < s->fo[k].nLeg; j++) free(s->fo[k].legT[j]); }
     } }
   free(s->aIni); free(s->video);
   ladoLiberar(&s->mArq); ladoLiberar(&s->mDon);
@@ -434,7 +462,11 @@ static const char *nomeLingua(const char *l) {
 static int modoDe(const Faixa *f, int flacConv) {
   int ok = avcodec_find_decoder(f->id) != NULL;
   switch (f->id) {
-    case AV_CODEC_ID_AAC: case AV_CODEC_ID_AC3: case AV_CODEC_ID_EAC3: case AV_CODEC_ID_OPUS:
+    // Opus (subtitle-rewrite 9c62d57, owner 16/11): copied into MPEG-TS the TV
+    // player never started (stuck before the first frame). As is in fMP4,
+    // like FLAC: that plays on the S95C.
+    case AV_CODEC_ID_OPUS: return M_MP4;
+    case AV_CODEC_ID_AAC: case AV_CODEC_ID_AC3: case AV_CODEC_ID_EAC3:
     case AV_CODEC_ID_MP3: case AV_CODEC_ID_MP2: return M_TS;
     case AV_CODEC_ID_FLAC:
       if (!flacConv) return M_MP4;
@@ -449,6 +481,62 @@ static int modoDe(const Faixa *f, int flacConv) {
 // tracks into fx[] and reads its seek index now (not on the viewer's first
 // seek). 0 = failed (the reason in fo[k].motivo; for the file itself the
 // session fails, for the donor only its tracks are missing).
+// SUBTITLE MATCH (owner 17/11): the embedded text subtitle tracks of a source
+// as its seek index lists them. Matroska's Cues carry a point per subtitle
+// block when the muxer indexed them (mkvmerge and FFmpeg do); FFmpeg puts them
+// in the stream's index when it reads the Cues, which prepFonte just did. No
+// byte is read for this. A track without points (Cues of the video only) is
+// left out: the audio match then does the whole job.
+static int ehTextoLeg(enum AVCodecID id) {
+  return id == AV_CODEC_ID_SUBRIP || id == AV_CODEC_ID_TEXT || id == AV_CODEC_ID_ASS || id == AV_CODEC_ID_SSA ||
+         id == AV_CODEC_ID_WEBVTT || id == AV_CODEC_ID_MOV_TEXT;
+}
+static int temSemCaixaL(const char *h, const char *n) {
+  size_t k = strlen(n);
+  for (; *h; h++) if (!strncasecmp(h, n, k)) return 1;
+  return 0;
+}
+static int cmpDouble(const void *a, const void *b) {
+  double x = *(const double *)a, y = *(const double *)b;
+  return x < y ? -1 : x > y;
+}
+static void legendasIndice(Fonte *fo, const char *quem) {
+  AVFormatContext *ic = fo->ic;
+  int i, sem = 0, poucos = 0;
+  fo->nLeg = 0;
+  for (i = 0; ic && i < (int)ic->nb_streams && fo->nLeg < DOA_LEG_MAX; i++) {
+    AVStream *st = ic->streams[i];
+    int n = 0, j;
+    double *t;
+    DoaLegInfo *li;
+    if (st->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE || !ehTextoLeg(st->codecpar->codec_id)) continue;
+    n = avformat_index_get_entries_count(st);
+    if (n <= 0) { sem++; continue; }
+    if (n < 20) { poucos++; continue; }
+    if (!(t = malloc(sizeof *t * (size_t)n))) continue;
+    for (j = 0; j < n; j++) {
+      const AVIndexEntry *e = avformat_index_get_entry(st, j);
+      t[j] = e ? e->timestamp * av_q2d(st->time_base) : 0;
+    }
+    qsort(t, (size_t)n, sizeof *t, cmpDouble);
+    li = &fo->leg[fo->nLeg];
+    memset(li, 0, sizeof *li);
+    { AVDictionaryEntry *l = av_dict_get(st->metadata, "language", NULL, 0), *ti = av_dict_get(st->metadata, "title", NULL, 0);
+      snprintf(li->lingua, sizeof li->lingua, "%s", l && strcmp(l->value, "und") ? l->value : "");
+      snprintf(li->nome, sizeof li->nome, "%s", ti ? ti->value : "");
+      snprintf(li->codec, sizeof li->codec, "%s", avcodec_get_name(st->codecpar->codec_id));
+      li->forcada = (st->disposition & AV_DISPOSITION_FORCED) || (ti && (temSemCaixaL(ti->value, "forced") || temSemCaixaL(ti->value, "sign"))); }
+    li->n = n;
+    fo->legT[fo->nLeg++] = t;
+  }
+  printf("[doador] %s: %d text subtitle track(s) indexed for the subtitle match", quem, fo->nLeg);
+  for (i = 0; i < fo->nLeg; i++)
+    printf("%s%s %s%s%s%.30s%s (%d points)", i ? "; " : ": ", fo->leg[i].lingua[0] ? fo->leg[i].lingua : "und", fo->leg[i].codec,
+           fo->leg[i].forcada ? " forced" : "", fo->leg[i].nome[0] ? " \"" : "", fo->leg[i].nome, fo->leg[i].nome[0] ? "\"" : "",
+           fo->leg[i].n);
+  if (sem || poucos) printf(" | left out: %d without index points, %d with under 20", sem, poucos);
+  printf("\n");
+}
 static int prepFonte(Sessao *s, int k) {
   Fonte *fo = &s->fo[k];
   double t0 = agoraMs();
@@ -516,6 +604,7 @@ static int prepFonte(Sessao *s, int k) {
     fo->leu = 1;
     printf("[doador] %s: seek index %s in %.0f ms: seeks go through stream %d (%d entries)\n", quem, r >= 0 ? "read" : "NOT read",
            agoraMs() - t1, fo->sBusca, avformat_index_get_entries_count(ic->streams[fo->sBusca])); }
+  legendasIndice(fo, quem);
   for (i = n0; i < s->nfx; i++) s->fx[i].modo = modoDe(&s->fx[i], s->flacConv);
   printf("[doador] %s open in %.0f ms (%s): %.1f s, video starts at %.3f s, %d audio track(s)%s\n", quem,
          agoraMs() - t0, ic->iformat ? ic->iformat->name : "?", fo->dur, fo->v0, s->nfx - n0,
@@ -614,6 +703,12 @@ static void videoInfo(Sessao *s) {
     s->largura = p->width; s->altura = p->height;
     r = st->avg_frame_rate.num > 0 ? st->avg_frame_rate : st->r_frame_rate;
     s->fps1000 = r.num > 0 && r.den > 0 ? lround(av_q2d(r) * 1000.0) : 0;
+    if (p->codec_id == AV_CODEC_ID_HEVC) {
+      int bits = p->bits_per_raw_sample > 0 ? p->bits_per_raw_sample : 8;
+      int pr = p->profile > 0 ? p->profile : bits > 8 ? 2 : 1;
+      snprintf(s->vCodecs, sizeof s->vCodecs, "hvc1.%d.4.L%d.B0", pr, p->level > 0 ? p->level : 150);
+    } else if (p->codec_id == AV_CODEC_ID_H264)
+      snprintf(s->vCodecs, sizeof s->vCodecs, "avc1.%02X00%02X", p->profile > 0 ? p->profile & 0xff : 100, p->level > 0 ? p->level : 41);
     snprintf(s->faixaVideo, sizeof s->faixaVideo, "%s", p->color_trc == AVCOL_TRC_SMPTE2084 ? "PQ" :
              p->color_trc == AVCOL_TRC_ARIB_STD_B67 ? "HLG" :
              av_packet_side_data_get(p->coded_side_data, p->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA) ? "PQ" : "");
@@ -686,13 +781,18 @@ static int conferirDoador(Sessao *s) {
   }
   pthread_mutex_lock(&s->m);
   s->fpsRazao = fa > 0 && fb > 0 ? fb / fa : 0;
-  s->difVel = fa > 0 && fb > 0 && fabs(fa - fb) / fa > 0.001;
+  // 24.000 against 23.976 is exactly 0.1 % (owner 17/11, Fight Club: a 4K
+  // remux at 24.000 and a 1080p at 23.976, lengths 8342.2 / 8348.4 s, ~2.5 s
+  // apart at 42 min). The old "> 0.001" left it out by a rounding hair.
+  s->difVel = fa > 0 && fb > 0 && fabs(fa - fb) / fa >= 0.0009;
   // No speed asked and a known film/TV ratio the lengths confirm (a French
   // 25 fps version of a 23.976 picture): that speed from the start, so a
   // match has only the offset left to find (webOS, owner's log 14/11).
   s->difPpm = 0;
+  // The lengths must also fit that speed better than none (a file whose
+  // header rounds 23.976 to 24 keeps 1.0); the subtitle match confirms it.
   if (!s->ppmPedido && s->difVel && velocidadeConhecida(s->fpsRazao) && a->dur > 0 &&
-      fabs(b->dur * s->fpsRazao / a->dur - 1.0) < 0.01) {
+      fabs(b->dur * s->fpsRazao / a->dur - 1.0) < 0.01 && fabs(b->dur * s->fpsRazao - a->dur) < fabs(b->dur - a->dur)) {
     s->fo[1].k = s->fpsRazao;
     s->difPpm = (int)lround((s->fpsRazao - 1.0) * 1e6);
     printf("[doador] donor at another speed (frame rates %.3f / %.3f, the lengths agree): played at ratio %.6f\n", fb, fa, s->fpsRazao);
@@ -779,7 +879,7 @@ static void *preparar(void *u) {
 #define MATCH_ESPERA_S   120     // the two captures fill while playing; paused longer: given up
 #define MATCH_MAX_MS     3600000 // beyond the sync's reach: never applied
 #define SEGUIR_A_CADA_S  120.0
-typedef struct { Sessao *s; int automatico, seguir; } MatchPedido;
+typedef struct { Sessao *s; int automatico, seguir, fino; } MatchPedido;
 
 // The file's audio the donor is compared with: the track in the donor
 // track's language (a dub keeps the music and effects), else its first one
@@ -801,6 +901,7 @@ static void tapArquivo(void *op, const AVPacket *p, const AVStream *st) {
   pthread_mutex_unlock(&s->mm);
 }
 static void matchIniciar(Sessao *s, int automatico, int seguir);
+static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino);
 // The donor's packets the generator reads (its playing track): the match's
 // donor side, and the follow's next look when it is due.
 static void doadorOuvir(Sessao *s, const AVPacket *p, const AVStream *st) {
@@ -889,7 +990,7 @@ static void matchFim(Sessao *s, int achou, const DoaDopasuj *r) {
 static void *matchFio(void *u) {
   MatchPedido *pd = u;
   Sessao *s = pd->s;
-  int seguir = pd->seguir, i, q, nk, achou = 0, como = 0, ncand = 0;
+  int seguir = pd->seguir, fino = pd->fino, i, q, nk, achou = 0, como = 0, ncand = 0;
   double t0 = agoraMs(), k0, kf, ks[2], center, off = 0, razao = 1, score = 0, cand[DTS_MATCH_CAND], candSc[DTS_MATCH_CAND];
   DtsMatchSig sm, sd;
   DoaDopasuj res;
@@ -912,25 +1013,27 @@ static void *matchFio(void *u) {
   dts_remux_set_tap(NULL, s, -1);
   pthread_mutex_lock(&s->mm); s->mArmD = 0; pthread_mutex_unlock(&s->mm);
   ladoSig(&s->mArq, &sm); ladoSig(&s->mDon, &sd);
-  printf("[doador] match%s: captured %.1f s of the file at %.1f s and %.1f s of the donor at %.1f s in %.0f ms\n", seguir ? " (follow)" : "",
+  printf("[doador] match%s: captured %.1f s of the file at %.1f s and %.1f s of the donor at %.1f s in %.0f ms\n",
+         seguir ? " (follow)" : fino ? " (audio refine)" : "",
          sm.n / (double)DTS_MATCH_HZ, sm.t0, sd.n / (double)DTS_MATCH_HZ, sd.t0, agoraMs() - t0);
   k0 = s->fo[1].k; kf = s->fpsRazao;
-  ks[0] = k0; ks[1] = kf; nk = kf > 0 && fabs(kf - k0) > 0.0005 && !seguir ? 2 : 1;
+  ks[0] = k0; ks[1] = kf; nk = kf > 0 && fabs(kf - k0) > 0.0005 && !seguir && !fino ? 2 : 1;
   center = s->fo[1].desloc;
   if (!s->cancel && sm.n >= (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ && sd.n >= (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ) {
     // 1. Near the current offset, from what was played.
     for (q = 0; q < nk; q++) {
       DtsMatchResult r;
-      int got = dts_match_search(&sm, &sd, ks[q], center, 10.0, &r);
+      // The refine (the subtitle match placed it already): +-1 s only.
+      int got = dts_match_search(&sm, &sd, ks[q], center, fino ? 1.0 : 10.0, &r);
       if (got && !r.confident) tentarConfirmar(&sm, &sd, ks[q], &r);
       if (got && q == 0) for (i = 0; i < r.ncand; i++) candAdd(&ncand, cand, candSc, r.cand_off[i], r.cand_score[i]);
       printf("[doador] match: ratio %.5f: %s offset %d ms (was %d) score %.2f margin %.2f\n", ks[q],
              got && r.confident ? "found" : "not trusted", got ? msDe(s, r.offset_s, ks[q]) : 0, s->doadorMs, got ? r.score : 0.0, got ? r.margin : 0.0);
-      if (got && r.confident && (!achou || r.score > score)) { achou = 1; como = 1; off = r.offset_s; razao = ks[q]; score = r.score; }
+      if (got && r.confident && (!achou || r.score > score)) { achou = 1; como = fino ? 7 : 1; off = r.offset_s; razao = ks[q]; score = r.score; }
     }
-    // 2. Not near (a click, not the follow): the donor read on its own where
-    // the lengths suggest, +-60 s, +-5 min (webOS match_job_run).
-    if (!achou && !seguir && !s->cancel) {
+    // 2. Not near (a click, not the follow, not the refine): the donor read
+    // on its own where the lengths suggest, +-60 s, +-5 min (webOS match_job_run).
+    if (!achou && !seguir && !fino && !s->cancel) {
       const double tm = sm.t0 + sm.n / 2.0 / DTS_MATCH_HZ, base = baseDe(s, k0), pad = DTS_MATCH_WIN_S / 2.0 + 5.0;
       int64_t total = s->fo[1].eng ? dts_engine_size(s->fo[1].eng) : 0;
       const double bps = total > 0 && s->fo[1].dur > 0 ? total / s->fo[1].dur : 0;
@@ -1001,7 +1104,8 @@ static void *matchFio(void *u) {
     }
   }
   if (!achou) res.dica_ms = abs(s->difCorte) > 10 && abs(s->difCorte) <= 600 ? -s->difCorte * 1000 : 0;
-  printf("[doador] match%s: %s in %.0f ms%s\n", seguir ? " (follow)" : "", achou ? "found" : "not found", agoraMs() - t0,
+  if (fino) res.como = 7;
+  printf("[doador] match%s: %s in %.0f ms%s\n", seguir ? " (follow)" : fino ? " (audio refine)" : "", achou ? "found" : "not found", agoraMs() - t0,
          achou ? "" : res.pesado ? " (a wide search skipped for its download)" : "");
   if (seguir) {
     // The follow corrects the offset by itself; the app hears of it.
@@ -1037,7 +1141,8 @@ static void *matchFio(void *u) {
   soltar(s);
   return NULL;
 }
-static void matchIniciar(Sessao *s, int automatico, int seguir) {
+static void matchIniciar(Sessao *s, int automatico, int seguir) { matchIniciarF(s, automatico, seguir, 0); }
+static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
   MatchPedido *pd;
   pthread_t t;
   const Faixa *d;
@@ -1049,7 +1154,7 @@ static void matchIniciar(Sessao *s, int automatico, int seguir) {
     if (!ocupado && !seguir) { DoaDopasuj z; memset(&z, 0, sizeof z); matchFim(s, 0, &z); }
     return;
   }
-  s->mEstado = 1; s->mAuto = automatico;
+  s->mEstado = 1; s->mAuto = automatico; s->mFino = fino;
   pthread_mutex_unlock(&s->m);
   d = &s->fx[s->audio];
   siA = matchSiArquivo(s, d);
@@ -1065,7 +1170,7 @@ static void matchIniciar(Sessao *s, int automatico, int seguir) {
   s->mArmD = 1;
   pthread_mutex_unlock(&s->mm);
   dts_remux_set_tap(tapArquivo, s, siA);
-  pd->s = s; pd->automatico = automatico; pd->seguir = seguir;
+  pd->s = s; pd->automatico = automatico; pd->seguir = seguir; pd->fino = fino;
   atomic_fetch_add(&s->refs, 1);
   if (pthread_create(&t, NULL, matchFio, pd) != 0) {
     atomic_fetch_sub(&s->refs, 1); free(pd);
@@ -1075,8 +1180,8 @@ static void matchIniciar(Sessao *s, int automatico, int seguir) {
     return;
   }
   pthread_detach(t);
-  printf("[doador] match%s%s: capturing ~%d s of the file's audio %d and the donor's %d while playing\n", seguir ? " (follow)" : "",
-         automatico ? " (by itself)" : "", DTS_MATCH_SECONDS, siA, d->si);
+  printf("[doador] match%s%s: capturing ~%d s of the file's audio %d and the donor's %d while playing\n",
+         seguir ? " (follow)" : fino ? " (audio refine, +-1 s)" : "", automatico ? " (by itself)" : "", DTS_MATCH_SECONDS, siA, d->si);
   fflush(stdout);
 }
 
@@ -1145,6 +1250,16 @@ static int drenarFifo(Sessao *s, int tudo) {
   }
   return 0;
 }
+// A packet's length in its stream's time base: the container's, else from
+// the codec (FFmpeg's frame size). 0 = unknown. (subtitle-rewrite cde2770;
+// the Opus TOC reading there was replaced by the opus parser, 7b60ede, which
+// this FFmpeg has.)
+static int64_t pacoteDur(const AVStream *st, const AVPacket *p) {
+  int a;
+  if (p->duration > 0) return p->duration;
+  a = av_get_audio_frame_duration2(st->codecpar, p->size);
+  return a > 0 && st->codecpar->sample_rate > 0 ? av_rescale_q(a, (AVRational){1, st->codecpar->sample_rate}, st->time_base) : 0;
+}
 // One more step: >0 progressed, 0 end of file, -1 error.
 static int produzir(Sessao *s, const Faixa *f, char *err, size_t en) {
   Fonte *fo = &s->fo[f->fonte];
@@ -1155,6 +1270,7 @@ static int produzir(Sessao *s, const Faixa *f, char *err, size_t en) {
     if (s->eof) return 0;
     r = av_read_frame(fo->ic, s->pk);
     fo->leu = 1;
+    if (r >= 0) s->lidos++;
     if (r < 0) {
       if (r != AVERROR_EOF) { snprintf(err, en, "reading the %s (%d)", f->fonte ? "donor" : "original file", r); return -1; }
       s->eof = 1;
@@ -1163,7 +1279,26 @@ static int produzir(Sessao *s, const Faixa *f, char *err, size_t en) {
     }
     if (s->pk->stream_index != f->si) { av_packet_unref(s->pk); continue; }
     if (s->pk->pts == AV_NOPTS_VALUE) s->pk->pts = s->pk->dts;
-    if (s->pk->pts == AV_NOPTS_VALUE) { av_packet_unref(s->pk); continue; }
+    // Matroska lacing without BlockDuration/DefaultDuration (subtitle-rewrite
+    // cde2770, owner 16/11): only the block's first frame has a timestamp, the
+    // others come with none. They used to be dropped (14 of 100 Opus packets
+    // per 2 s: no sound). Each one follows the one before it.
+    {
+      int64_t d = pacoteDur(st, s->pk);
+      if (s->pk->pts == AV_NOPTS_VALUE && s->proxPts != AV_NOPTS_VALUE) {
+        s->pk->pts = s->pk->dts = s->proxPts;
+        s->semPts++;
+        if (s->semPtsLog < 3) {
+          s->semPtsLog++;
+          printf("[doador] %saudio %d: a packet without a timestamp (laced frame) follows the one before (%.3f s, %.1f ms)\n",
+                 f->fonte ? "donor " : "", f->ord, s->proxPts * av_q2d(st->time_base), d * av_q2d(st->time_base) * 1000.0);
+        }
+      }
+      if (s->pk->pts == AV_NOPTS_VALUE) { av_packet_unref(s->pk); continue; }
+      if (s->pk->duration <= 0 && d > 0) s->pk->duration = d;
+      s->proxPts = d > 0 ? s->pk->pts + d : AV_NOPTS_VALUE;
+    }
+    s->guardados++;
     if (f->fonte == 1) doadorOuvir(s, s->pk, st);
     if (!s->dec) {
       AVPacket *c = av_packet_clone(s->pk);
@@ -1244,6 +1379,7 @@ static int posicionar(Sessao *s, int fi, int seg, const double *ini, double len,
   if (!fo->conectada) { fo->conectada = 1; fo->nVoltas++; }
   filaLimpar(s);
   s->eof = 0;
+  s->proxPts = AV_NOPTS_VALUE;   // a seek: the next timestamp comes from the file again
   { int i; for (i = 0; i < (int)fo->ic->nb_streams; i++) fo->ic->streams[i]->discard = i == f->si ? AVDISCARD_DEFAULT : AVDISCARD_ALL; }
   if (f->modo == M_AC3 || f->modo == M_AAC) { if (abrirConversor(s, f, err, en) < 0) { s->gOk = 0; return -1; } }
   else codecLiberar(s);
@@ -1362,8 +1498,12 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   AVRational tb, srcTb;
   Mux m;
   int mp4 = f->modo == M_MP4, saltou = 0, nPk = 0, rr = 0, ab = 0;
+  // FLAC/Opus (owner 17/11: a donor's FLAC had no sound): packets, their
+  // lengths and sizes, and what of the segment they cover, first 3 segments.
+  int diag = 0, dSem = 0, tMin = 1 << 30, tMax = 0;
+  double dMin = 1e9, dMax = 0, ult = -1;
   const char *como = "";
-  double t0 = agoraMs(), fs, fe, pri = -1, tl;
+  double t0 = agoraMs(), tAviso = agoraMs(), fs, fe, pri = -1, tl;
   if (!par) { snprintf(err, en, "out of memory"); return -1; }
   if (seg < 0) {   // init: the header alone (the converter state is not touched)
     AVStream *as = s->fo[f->fonte].ic->streams[f->si];
@@ -1387,15 +1527,34 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   avcodec_parameters_free(&par);
   fs = s->aIni[seg] + tl0(s);   // the playing file's time (a donor's packets are mapped onto it)
   fe = seg + 1 < s->naSeg ? s->aIni[seg + 1] + tl0(s) : 1e18;
+  diag = (f->id == AV_CODEC_ID_FLAC || f->id == AV_CODEC_ID_OPUS) && !s->dec && s->diagLog < 3;
+  s->lidos = s->guardados = 0;
   for (;;) {
     Item it;
     if ((ab = abandonar(s, so, chave)) != 0) { rr = -2; break; }
+    // Still making it after 3 s (owner 17/11: a 4K file's donor never served
+    // one segment and the log could not say why): what the reader did so far.
+    if (agoraMs() - tAviso >= 3000.0) {
+      const Fonte *fa = &s->fo[f->fonte];
+      tAviso = agoraMs();
+      printf("[doador] still making %saudio %d seg %d after %.0f ms (%s): %ld packets read, %ld of the track, %d without a timestamp, "
+             "%d queued, %d out, reader %s at %.1f s\n", f->fonte ? "donor " : "", f->ord, seg, tAviso - t0, como, s->lidos, s->guardados,
+             s->semPts, s->fN, nPk, fa->conectada ? "connected" : "released", s->fN ? s->fila[(s->fIni + s->fN - 1) % FILA_MAX].t : -1.0);
+      fflush(stdout);
+    }
     if (!s->fN) { rr = produzir(s, f, err, en); if (rr < 0) break; if (rr == 0 && !s->fN) { rr = 0; break; } continue; }
     it = s->fila[s->fIni];
     if (it.t >= fe) break;
     s->fIni = (s->fIni + 1) % FILA_MAX; s->fN--;
     if (saltou && it.t < fs - 0.001) { av_packet_free(&it.p); continue; }
     if (pri < 0) pri = it.t;
+    if (diag) {
+      double d = it.p->duration > 0 ? it.p->duration * av_q2d(srcTb) * 1000.0 : -1;
+      if (d < 0) dSem++; else { if (d < dMin) dMin = d; if (d > dMax) dMax = d; }
+      if (it.p->size < tMin) tMin = it.p->size;
+      if (it.p->size > tMax) tMax = it.p->size;
+      if (it.t > ult) ult = it.t;
+    }
     if (escreverAudio(s, &m, 0, it.p, srcTb, 0) < 0) { av_packet_free(&it.p); snprintf(err, en, "mux write"); rr = -1; break; }
     av_packet_free(&it.p);
     nPk++;
@@ -1433,6 +1592,15 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   printf("[doador] %saudio %d seg %d (%.1f-%.1f s): %d packets, %zu KB, %.0f ms, %s; first audio at %.3f s\n",
          f->fonte ? "donor " : "", f->ord, seg, s->aIni[seg], s->aIni[seg + 1], nPk, r->n / 1024, tl - t0, como,
          pri >= 0 ? pri - tl0(s) : -1.0);
+  if (diag && nPk > 0) {
+    const AVCodecParameters *cp = s->fo[f->fonte].ic->streams[f->si]->codecpar;
+    s->diagLog++;
+    printf("[doador] %s %saudio %d seg %d: %d packets, durations %s%.1f-%.1f ms%s, sizes %d-%d bytes, covers %.3f-%.3f s "
+           "(+%d without a timestamp so far) | extradata %d bytes, %d ch %d Hz, fMP4 %s\n",
+           f->id == AV_CODEC_ID_FLAC ? "FLAC" : "Opus", f->fonte ? "donor " : "", f->ord, seg, nPk, dMax > 0 ? "" : "none, ",
+           dMax > 0 ? dMin : 0.0, dMax, dSem ? " (some unset)" : "", tMin, tMax, pri - tl0(s), ult - tl0(s), s->semPts,
+           cp->extradata_size, f->canais, f->taxa, mp4 ? "yes" : "no");
+  }
   fflush(stdout);
   return 0;
 }
@@ -1470,6 +1638,17 @@ static void nomeRendicao(const Sessao *s, const Faixa *f, char *o, size_t n) {
   else snprintf(o, n, "%s %d (%s %dch)", f->nome[0] ? f->nome : nomeLingua(f->lingua), f->ord + 1, f->codec, f->canais);
   for (c = o; *c; c++) if (*c == '"' || *c == ',' || (unsigned char)*c < 32) *c = ' ';
 }
+// RFC 6381 name of what rendition f carries (the master's form 1).
+static const char *codecsAudio(const Faixa *f) {
+  switch (f->modo) {
+    case M_AC3: return "ac-3";
+    case M_AAC: return "mp4a.40.2";
+    case M_MP4: return f->id == AV_CODEC_ID_OPUS ? "Opus" : "fLaC";
+    default:
+      return f->id == AV_CODEC_ID_AC3 ? "ac-3" : f->id == AV_CODEC_ID_EAC3 ? "ec-3" : f->id == AV_CODEC_ID_MP3 ? "mp4a.40.34" :
+             f->id == AV_CODEC_ID_MP2 ? "mp4a.40.33" : "mp4a.40.2";
+  }
+}
 static void plMaster(Sessao *s, Txt *t) {
   int i, mp4 = 0;
   for (i = 0; i < s->nfx; i++) if (s->fx[i].modo == M_MP4) mp4 = 1;
@@ -1489,6 +1668,22 @@ static void plMaster(Sessao *s, Txt *t) {
   // The video: the converter's media playlist, its segments carry no audio
   // (the TV plays the audio of the video segments when they have one, and
   // ignores the rendition: owner's S95C, 14/11). Integers only (LC_NUMERIC).
+  // Form 1 (the retry after a 4K file never asked for audio, owner 17/11):
+  // CODECS with the video and every audio codec of the group, BANDWIDTH at
+  // most 60 Mbit/s. Form 0 is what played on the S95C (1080p).
+  if (s->variante == 1) {
+    char cod[256];
+    size_t u = (size_t)snprintf(cod, sizeof cod, "%s", s->vCodecs);
+    for (i = 0; i < s->nfx; i++) {
+      const char *c = s->fx[i].modo == M_FORA ? NULL : codecsAudio(&s->fx[i]);
+      int j, dup = 0;
+      if (!c) continue;
+      for (j = 0; j < i; j++) if (s->fx[j].modo != M_FORA && !strcmp(codecsAudio(&s->fx[j]), c)) dup = 1;
+      if (!dup && u + strlen(c) + 2 < sizeof cod) u += (size_t)snprintf(cod + u, sizeof cod - u, "%s%s", u ? "," : "", c);
+    }
+    tx(t, "#EXT-X-STREAM-INF:BANDWIDTH=%ld,AUDIO=\"aud\"", s->banda + 1500000L > 60000000L ? 60000000L : s->banda + 1500000L);
+    if (cod[0]) tx(t, ",CODECS=\"%s\"", cod);
+  } else
   tx(t, "#EXT-X-STREAM-INF:BANDWIDTH=%ld,AUDIO=\"aud\"", s->banda + 1500000L);
   if (s->largura > 0 && s->altura > 0) tx(t, ",RESOLUTION=%dx%d", s->largura, s->altura);
   if (s->fps1000 > 0) tx(t, ",FRAME-RATE=%ld.%03ld", s->fps1000 / 1000, s->fps1000 % 1000);
@@ -1551,6 +1746,19 @@ static int atender(int so, const char *metodo, const char *caminho, int manter) 
     return responder(so, 404, NULL, "", 0, 0, head, NULL) && 0;
   }
   snprintf(nome, sizeof nome, "%s", caminho + 2 + lt);
+  // Every request the TV makes (owner 17/11: a 4K file's session served the
+  // master and an audio playlist, then nothing; the log could not say whether
+  // the TV ever asked for an audio segment). All of a session's first 80,
+  // then everything but the audio segments (their own line says them).
+  { int nr = atomic_fetch_add(&s->pedTotal, 1) + 1, seg = sscanf(nome, "a%d_%d.", &k, &i) == 2;
+    if (seg || strstr(nome, "_init.mp4")) atomic_fetch_add(&s->pedAudio, 1);
+    if (!strcmp(nome, "master.m3u8")) atomic_fetch_add(&s->pedVideo, 1);
+    if (nr <= 80 || !seg) {
+      printf("[doador] #%d -> %s %s (+%.0f ms since the session opened, %d audio request(s) so far)\n", nr, metodo, nome,
+             t0 - s->abertoMs, atomic_load(&s->pedAudio));
+      fflush(stdout);
+    }
+    k = -1; i = -1; }
   if (!esperarPronto(s)) {
     printf("[doador] request %s: the session is not ready (%s)\n", nome, s->motivo[0] ? s->motivo : "timeout");
     fflush(stdout);
@@ -1561,7 +1769,18 @@ static int atender(int so, const char *metodo, const char *caminho, int manter) 
     Txt t = { 0 };
     plMaster(s, &t);
     ok = t.b && responder(so, 200, "application/vnd.apple.mpegurl", t.b, t.n, manter, head, s);
-    printf("[doador] master.m3u8 served (%zu bytes): the converter's video + %d audio rendition(s)\n", t.n, s->nfx);
+    printf("[doador] master.m3u8 served (%zu bytes, form %d): the converter's video + %d audio rendition(s)\n", t.n, s->variante, s->nfx);
+    // The master itself, line by line (relative URIs; the video's local URL
+    // carries the converter's session token: cut).
+    if (t.b) {
+      const char *p = t.b, *fim = t.b + t.n;
+      while (p < fim) {
+        const char *nl = memchr(p, '\n', (size_t)(fim - p)), *e = nl ? nl : fim, *h = strstr(p, "://");
+        if (h && h < e) printf("[doador]   | <the converter's video playlist (local URL)>\n");
+        else printf("[doador]   | %.*s\n", (int)(e - p), p);
+        p = nl ? nl + 1 : fim;
+      }
+    }
     fflush(stdout);
     free(t.b);
   } else if (sscanf(nome, "a%d.m3u8", &k) == 1 && strstr(nome, ".m3u8") && !strchr(nome, '_')) {
@@ -1693,7 +1912,9 @@ int doa_abrir(const DoaAbrir *o, char *out, size_t n) {
   if (o->doador_ppm) s->fo[1].k = 1.0 + o->doador_ppm / 1e6;
   atomic_store(&s->espChave, -1L);
   s->flacConv = o->flac ? 1 : 0;
-  s->audio = o->audio; s->gFaixa = -1; s->gSeg = -1; s->gFonte = -1;
+  s->audio = o->audio; s->gFaixa = -1; s->gSeg = -1; s->gFonte = -1; s->proxPts = AV_NOPTS_VALUE;
+  s->abertoMs = agoraMs();
+  s->variante = o->variante;
   s->umaConexao = !o->duas_conexoes;
   s->nfo = doador ? 2 : 1;
   // The converter's master (".../m.m3u8") names its media playlist v.m3u8:
@@ -1892,6 +2113,52 @@ void doa_dopasuj(int automatico) {
   if (s) matchIniciar(s, automatico, 0);
   soltar(s);
 }
+void doa_dopasuj_fino(void) {
+  Sessao *s = pegar();
+  if (s) matchIniciarF(s, 1, 0, 1);
+  soltar(s);
+}
+int doa_pedidos_audio(void) { Sessao *s = pegar(); int v = s ? atomic_load(&s->pedAudio) : 0; soltar(s); return v; }
+int doa_pedidos(void) { Sessao *s = pegar(); int v = s ? atomic_load(&s->pedTotal) : 0; soltar(s); return v; }
+int doa_legendas(int fonte, DoaLegInfo *out, int max) {
+  Sessao *s = pegar();
+  int n = 0, i;
+  if (s && s->pronto && fonte >= 0 && fonte < s->nfo && !s->fo[fonte].falhou)
+    for (i = 0; i < s->fo[fonte].nLeg && n < max; i++) out[n++] = s->fo[fonte].leg[i];
+  soltar(s);
+  return n;
+}
+int doa_legenda_tempos(int fonte, int k, double *t, int max) {
+  Sessao *s = pegar();
+  int n = 0;
+  if (s && s->pronto && fonte >= 0 && fonte < s->nfo && !s->fo[fonte].falhou && k >= 0 && k < s->fo[fonte].nLeg) {
+    n = s->fo[fonte].leg[k].n < max ? s->fo[fonte].leg[k].n : max;
+    memcpy(t, s->fo[fonte].legT[k], sizeof *t * (size_t)n);
+  }
+  soltar(s);
+  return n;
+}
+// The subtitle match's line (file = k * donor + desloc) handed to the app as a
+// match result: ms against the session's base at that speed, ppm the speed.
+void doa_aplicar_legendas(double k, double desloc) {
+  Sessao *s = pegar();
+  if (s && s->pronto && s->nfo > 1 && !s->fo[1].falhou && k > 0.9 && k < 1.1) {
+    DoaDopasuj r;
+    memset(&r, 0, sizeof r);
+    r.ms = msDe(s, desloc, k);
+    r.ppm = fabs(k - 1.0) > 0.0002 ? (int)lround((k - 1.0) * 1e6) : 0;
+    r.como = 6;
+    pthread_mutex_lock(&s->m);
+    if (s->mEstado != 1) {
+      s->mRes = r; s->mEstado = 2; s->mNovo = 1; s->mAuto = 1; s->mFino = 0;
+      printf("[doador] subtitle match: file = %.6f x donor %+.3f s -> offset %+d ms, speed %+d ppm (was %+d ms)\n", k, desloc, r.ms,
+             r.ppm, s->doadorMs);
+    } else printf("[doador] subtitle match: an audio match is running, its result waits for it\n");
+    pthread_mutex_unlock(&s->m);
+    fflush(stdout);
+  }
+  soltar(s);
+}
 int doa_dopasuj_resultado(DoaDopasuj *out, int *automatico) {
   Sessao *s = pegar();
   int v = 0;
@@ -1939,7 +2206,7 @@ void doa_log(void) {
   Sessao *s = pegar();
   if (s) {
     DtsEngineRings an;
-    int meus = -1, socks = skContar(&meus), k;
+    int meus = -1, por[4], socks = skContar(&meus, por), k;
     dts_engine_rings(&an, 0);
     printf("[doador] 10s: %s, audio segments %ld (%lld KB, avg %.0f ms), dropped %ld, failed %ld%s%s\n",
            s->pronto ? "ready" : s->falhou ? "failed" : "preparing", s->nSeg, s->bytes / 1024, s->nSeg ? s->msLer / s->nSeg : 0.0,
@@ -1947,8 +2214,10 @@ void doa_log(void) {
     // The spike's questions (owner 15/11): connections to the files' hosts
     // (all of Nuvio's, the converter's included, and the TV player's), the
     // readers' memory, and what switching between the sources costs.
-    printf("[doador] 10s connections: %d to the watched hosts (%d of them Nuvio's)%s; reader rings alive %d = %lld MiB (peak %d = %lld MiB)",
-           socks, meus, socks < 0 ? " (not readable here)" : "", an.alive, an.bytes >> 20, an.peak, an.peak_bytes >> 20);
+    printf("[doador] 10s connections: %d to the watched hosts (%d of them Nuvio's: file host %d, donor host %d)%s; "
+           "requests %d (audio %d); reader rings alive %d = %lld MiB (peak %d = %lld MiB)",
+           socks, meus, por[0], por[1], socks < 0 ? " (not readable here)" : "", atomic_load(&s->pedTotal), atomic_load(&s->pedAudio),
+           an.alive, an.bytes >> 20, an.peak, an.peak_bytes >> 20);
     for (k = 0; k < s->nfo; k++)
       printf("; %s %s, gave back %ld, took again %ld", k ? "donor" : "file",
              s->fo[k].falhou ? "failed" : !s->fo[k].ic ? "closed" : s->fo[k].conectada ? "connected" : "released",

@@ -59,6 +59,10 @@ typedef struct {
    * within 1 %: that speed by itself (doa_diferenca's ppm says it). */
   int doador_ppm;
   int seguir;                 /* another cut: follow it through the film after a find (doa_seguir_evento) */
+  /* Master playlist form (owner 17/11: 4K remux sources never asked for an
+   * audio segment). 0 = as proven on the S95C; 1 = the retry's: CODECS on the
+   * STREAM-INF (video + every rendition) and BANDWIDTH capped at 60 Mbit/s. */
+  int variante;
 } DoaAbrir;
 /* New session (replaces any previous one): writes the URL the TV player opens.
  * The sources are read in a thread; the player's requests wait for it. 0 =
@@ -126,4 +130,26 @@ int  doa_seguir_evento(int *ms);
  * *lento = 1 it downloads slower than the picture plays (two 2 s segments
  * that took over 10 s). */
 int  doa_doador_saude(int *lento);
+/* Requests the TV made to this session so far: audio segments (and fMP4
+ * inits), and every request. The app's no-audio check (video_tpk.c). */
+int  doa_pedidos_audio(void);
+int  doa_pedidos(void);
+
+/* SUBTITLE MATCH, the first level of the sync (owner 17/11): the embedded
+ * TEXT subtitle tracks of the file (fonte 0) and of the donor (fonte 1) as
+ * their seek index lists them (the start of each indexed block, in that
+ * source's own time). Read from the index prepFonte loads anyway: no request
+ * more. Tracks with fewer than 20 points are left out. */
+#define DOA_LEG_MAX 8
+typedef struct { char lingua[16], nome[64], codec[16]; int forcada, n; } DoaLegInfo;
+int  doa_legendas(int fonte, DoaLegInfo *out, int max);
+/* Start times (s, sorted) of track `k` of doa_legendas; returns the count. */
+int  doa_legenda_tempos(int fonte, int k, double *t, int max);
+/* The subtitle match's result: the file's time = k * the donor's time + desloc
+ * (container times). Handed to the app like a match (doa_dopasuj_resultado,
+ * como 6, automatico 1): ms and ppm against the session's base. */
+void doa_aplicar_legendas(double k, double desloc);
+/* SECOND LEVEL: the audio match refining the offset in force (+-1 s, about
+ * 40 s of playback, no wide search). como 7. */
+void doa_dopasuj_fino(void);
 #endif

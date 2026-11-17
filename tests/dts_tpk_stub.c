@@ -33,3 +33,8 @@ int  ajustes_audio_offset_ms(void) { return 0; }
 int  ajustes_audio_externo_auto(void) { return 1; }
 int  ajustes_audio_externo_seguir(void) { return 0; }
 void dts_remux_set_audio_offset_ms(int ms) { (void)ms; }
+/* The subtitle match (doadorleg.c): its own test, tests/doadorleg.sh. */
+#include "../src/doadorleg.h"
+void doadorleg_iniciar(double pos) { (void)pos; }
+void doadorleg_cancelar(void) {}
+int  doadorleg_resultado(double *k, double *d, char *m, size_t n) { (void)k; (void)d; (void)m; (void)n; return 0; }

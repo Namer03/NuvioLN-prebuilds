@@ -4062,6 +4062,61 @@ static int filtroTem(const Stream *s, int cat, const char *nome) {
     if (!strcmp(fontefiltro_opcao(cat, i), nome)) return (s->filtro.valores[cat] & fontefiltro_bit(cat, i)) != 0;
   return 0;
 }
+// LANGUAGES FROM THE LABELS (owner 17/11: "181 versions in 2 languages" for
+// Fight Club, the add-ons' declared lists alone). Flags (regional indicator
+// pairs) in the source's name/description, skipping what is about subtitles:
+// a line that names subtitles, and on any line what follows a subtitle mark
+// (💬 📝 🔤 or the word) until an audio/language mark (🗣 🎧 🔊 🎙 🌐 🌎 🌍).
+static const struct { char pais[3], idioma[4]; } AEXT_BAND[] = {
+  { "GB", "en" }, { "US", "en" }, { "AU", "en" }, { "CA", "en" }, { "IE", "en" }, { "NZ", "en" },
+  { "BR", "pt" }, { "PT", "pt" }, { "ES", "es" }, { "MX", "es" }, { "AR", "es" }, { "CO", "es" }, { "CL", "es" },
+  { "FR", "fr" }, { "BE", "fr" }, { "DE", "de" }, { "AT", "de" }, { "CH", "de" }, { "IT", "it" }, { "NL", "nl" },
+  { "RU", "ru" }, { "UA", "uk" }, { "PL", "pl" }, { "TR", "tr" }, { "JP", "ja" }, { "KR", "ko" }, { "CN", "zh" },
+  { "TW", "zh" }, { "HK", "zh" }, { "IN", "hi" }, { "SA", "ar" }, { "AE", "ar" }, { "EG", "ar" }, { "SE", "sv" },
+  { "NO", "no" }, { "DK", "da" }, { "FI", "fi" }, { "GR", "el" }, { "CZ", "cs" }, { "SK", "sk" }, { "HU", "hu" },
+  { "RO", "ro" }, { "IL", "he" }, { "TH", "th" }, { "VN", "vi" }, { "ID", "id" }, { "MY", "ms" }, { "BG", "bg" },
+  { "HR", "hr" }, { "RS", "sr" }, { "SI", "sl" }, { "BA", "bs" }, { "EE", "et" }, { "LV", "lv" }, { "LT", "lt" },
+  { "IS", "is" }, { "IR", "fa" }, { "PK", "ur" }, { "BD", "bn" }, { "PH", "tl" }, { "LK", "si" }, { "GE", "ka" },
+  { "AM", "hy" }, { "AZ", "az" }, { "KZ", "kk" }, { "AL", "sq" }, { "MK", "mk" },
+};
+static void aextJuntar(AudioExtEntrada *e, const char *cod) {
+  for (int j = 0; j < e->nIdiomas; j++) if (!strcasecmp(e->idiomas[j], cod) || ling_casa(e->idiomas[j], cod) || ling_casa(cod, e->idiomas[j])) return;
+  if (e->nIdiomas < AUDIOEXT_IDIOMAS) snprintf(e->idiomas[e->nIdiomas++], sizeof e->idiomas[0], "%.7s", cod);
+}
+static void aextBandeiras(const char *t, AudioExtEntrada *e) {
+  const unsigned char *p = (const unsigned char *)t;
+  int leg = 0;
+  if (!t) return;
+  while (*p) {
+    if (*p == '\n') { leg = 0; p++; continue; }
+    // A whole line about subtitles.
+    if ((p == (const unsigned char *)t || p[-1] == '\n')) {
+      const char *fim = strchr((const char *)p, '\n');
+      size_t n = fim ? (size_t)(fim - (const char *)p) : strlen((const char *)p);
+      char l[512];
+      snprintf(l, sizeof l, "%.*s", (int)(n < sizeof l ? n : sizeof l - 1), (const char *)p);
+      for (char *c = l; *c; c++) *c = (char)tolower((unsigned char)*c);
+      if (strstr(l, "subtit") || strstr(l, "subs") || strstr(l, "legend") || strstr(l, "napisy")) leg = 1;
+    }
+    if (p[0] == 0xF0 && p[1] == 0x9F) {
+      // 💬 F0 9F 92 AC, 📝 F0 9F 93 9D, 🔤 F0 9F 94 A4: subtitles from here.
+      if ((p[2] == 0x92 && p[3] == 0xAC) || (p[2] == 0x93 && p[3] == 0x9D) || (p[2] == 0x94 && p[3] == 0xA4)) { leg = 1; p += 4; continue; }
+      // 🗣 F0 9F 97 A3, 🎧 F0 9F 8E A7, 🔊 F0 9F 94 8A, 🎙 F0 9F 8E 99, 🌐 F0 9F 8C 90, 🌎 F0 9F 8C 8E, 🌍 F0 9F 8C 8D: audio again.
+      if ((p[2] == 0x97 && p[3] == 0xA3) || (p[2] == 0x8E && (p[3] == 0xA7 || p[3] == 0x99)) || (p[2] == 0x94 && p[3] == 0x8A) ||
+          (p[2] == 0x8C && (p[3] == 0x90 || p[3] == 0x8E || p[3] == 0x8D))) { leg = 0; p += 4; continue; }
+      // A flag: two regional indicators (F0 9F 87 A6..BF each).
+      if (p[2] == 0x87 && p[3] >= 0xA6 && p[3] <= 0xBF && p[4] == 0xF0 && p[5] == 0x9F && p[6] == 0x87 && p[7] >= 0xA6 && p[7] <= 0xBF) {
+        if (!leg) {
+          char a = (char)('A' + (p[3] - 0xA6)), b = (char)('A' + (p[7] - 0xA6));
+          for (size_t i = 0; i < sizeof AEXT_BAND / sizeof *AEXT_BAND; i++)
+            if (AEXT_BAND[i].pais[0] == a && AEXT_BAND[i].pais[1] == b) { aextJuntar(e, AEXT_BAND[i].idioma); break; }
+        }
+        p += 8; continue;
+      }
+    }
+    p++;
+  }
+}
 void stream_audioext_entrada(const Stream *s, AudioExtEntrada *e) {
   const char *lista, *p, *fim;
   size_t limite;
@@ -4079,8 +4134,7 @@ void stream_audioext_entrada(const Stream *s, AudioExtEntrada *e) {
       if (ln > le && !strcasecmp(nome + ln - le, fora[k])) e->hls = 1;
     } }
   e->naoVideo = s->naoVideo;
-  // (The webOS branch also reads languages hinted by the labels; master has
-  // only the declared list.)
+  // The declared list first; the labels' hints are added below.
   lista = s->audioIdiomas;
   limite = sizeof s->audioIdiomas;
   p = lista; fim = p + strnlen(p, limite);
@@ -4103,16 +4157,37 @@ void stream_audioext_entrada(const Stream *s, AudioExtEntrada *e) {
     }
     p = f ? f + 1 : fim;
   }
+  // The labels' languages too: the source list's language filter (names,
+  // codes, flags it already reads) and every flag outside the subtitles.
+  { static const struct { const char *opc, *cod; } LF[] = {
+      { "Inglês", "en" }, { "Hindi", "hi" }, { "Italiano", "it" }, { "Espanhol", "es" }, { "Francês", "fr" },
+      { "Alemão", "de" }, { "Português", "pt" }, { "Polonês", "pl" }, { "Tcheco", "cs" }, { "Latino", "es" },
+      { "Japonês", "ja" }, { "Coreano", "ko" }, { "Chinês", "zh" } };
+    for (size_t i = 0; i < sizeof LF / sizeof *LF; i++) if (filtroTem(s, FONTEFILTRO_LINGUAS, LF[i].opc)) aextJuntar(e, LF[i].cod);
+    aextBandeiras(s->rotulo, e);
+    aextBandeiras(s->descricao, e); }
+  // Its audio can be read on its own (MP4/MOV: the sample tables point at
+  // the audio, no picture bytes): first in its language (owner 17/11).
+  { const char *nome = s->arquivo[0] ? s->arquivo : s->url;
+    size_t ln = strcspn(nome, "?#");
+    static const char *const mp4[] = { ".mp4", ".m4v", ".mov" };
+    e->soAudio = s->mp4 != 0;
+    for (size_t k = 0; k < sizeof mp4 / sizeof *mp4; k++) {
+      size_t le = strlen(mp4[k]);
+      if (ln > le && !strncasecmp(nome + ln - le, mp4[k], le)) e->soAudio = 1;
+    } }
+  e->atmos = s->dolbyAtmos || filtroTem(s, FONTEFILTRO_AUDIO, "Atmos");
   // Several audio tags (a Polish DD and an English DTS-HD): the one the TV
   // takes as it is decides; DTS/TrueHD only when nothing else was declared.
   if (filtroTem(s, FONTEFILTRO_AUDIO, "DD+")) e->codec = AEXT_DDP;
   else if (filtroTem(s, FONTEFILTRO_AUDIO, "DD")) e->codec = AEXT_DD;
   else if (filtroTem(s, FONTEFILTRO_AUDIO, "AAC")) e->codec = AEXT_AAC;
+  else if (filtroTem(s, FONTEFILTRO_AUDIO, "FLAC")) e->codec = AEXT_FLAC;
+  else if (filtroTem(s, FONTEFILTRO_AUDIO, "OPUS")) e->codec = AEXT_OPUS;
   else if (filtroTem(s, FONTEFILTRO_AUDIO, "TrueHD")) e->codec = AEXT_TRUEHD;
   else if (filtroTem(s, FONTEFILTRO_AUDIO, "DTS:X") || filtroTem(s, FONTEFILTRO_AUDIO, "DTS-HD MA") ||
            filtroTem(s, FONTEFILTRO_AUDIO, "DTS-HD") || filtroTem(s, FONTEFILTRO_AUDIO, "DTS-ES") ||
            filtroTem(s, FONTEFILTRO_AUDIO, "DTS")) e->codec = AEXT_DTS;
-  else if (filtroTem(s, FONTEFILTRO_AUDIO, "OPUS") || filtroTem(s, FONTEFILTRO_AUDIO, "FLAC")) e->codec = AEXT_OUTRO;
   else e->codec = AEXT_DESCONHECIDO;
   e->canais = filtroTem(s, FONTEFILTRO_CANAIS, "7.1") ? 8 : filtroTem(s, FONTEFILTRO_CANAIS, "6.1") ? 7 :
               filtroTem(s, FONTEFILTRO_CANAIS, "5.1") ? 6 : filtroTem(s, FONTEFILTRO_CANAIS, "2.0") ? 2 : 0;
