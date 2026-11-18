@@ -498,9 +498,9 @@ enum { SED_OFFSET, SED_PASSO, SED_KAND, SED_DICA, SED_AQUI, SED_ZERAR, SED_SCAN 
 #define SED_MAXL 8
 static int sincEd, sincFoco, sincRep, sincPasso = 1, sincOrig;
 static unsigned sincAutoVisto;
-// SCAN AGAIN'S PAGE (owner 18/11): OK on "Scan again" lists Auto and the
-// file's own audio tracks; OK on one keeps it for this show (audioext) and
-// scans with it. Back returns to the editor.
+// SCAN AGAIN'S PICKER (owner 18/11): OK on "Scan again" opens a small overlay
+// over the editor (not a page) with Auto and the file's own audio tracks; OK
+// on one keeps it for this show (audioext) and scans with it. Back closes it.
 #define SCAN_MAX 12
 static int scanPag, scanFoco, scanN;
 #if defined(NV_TPK)
@@ -1634,7 +1634,7 @@ static void scanAbrir(void) {
   scanN = 0;
 #endif
   scanPag = 1; scanFoco = scanAtual();
-  printf("[ext-audio] scan again: match against which audio (%d of the file's tracks, now row %d)\n", scanN, scanFoco); fflush(stdout);
+  printf("[ext-audio] scan again: the picker opens (%d of the file's tracks, now row %d)\n", scanN, scanFoco); fflush(stdout);
 }
 static void scanTecla(SDL_Keycode k) {
   if (k == SDLK_AC_BACK || k == SDLK_ESCAPE || k == SDLK_BACKSPACE) { scanPag = 0; return; }
@@ -1702,7 +1702,7 @@ static void sincTecla(SDL_Keycode k, int repeat) {
       sincFoco = 0; return;
     }
     if (t == SED_SCAN) {
-      // Its page: which audio to match against (Auto or one of the file's tracks).
+      // Its picker overlay: which audio to match against (Auto or one of the file's tracks).
       if (audioext_dopasuj_ativo()) { player_toast(i18n("The sync is already scanning…"), 2500); return; }
       scanAbrir();
       return;
@@ -2852,43 +2852,48 @@ static void corpoEstilo(GfxRect c, float a) {
 #define SED_LN_H 74.0f
 #define SED_LN_VAO 4.0f
 static float alturaSinc(void) {
-  int tipo[SED_MAXL], arg[SED_MAXL], n = scanPag ? scanN + 1 : sincLinhas(tipo, arg);
+  int tipo[SED_MAXL], arg[SED_MAXL], n = sincLinhas(tipo, arg);
   return IL_PAD_Y + IL_TIT_H + 14.0f + n * SED_LN_H + (n - 1) * SED_LN_VAO + 14.0f + IL_PE_H + IL_PAD_Y;
 }
-static void corpoScan(GfxRect c, float a) {
-  float x0 = c.x + IL_PAD_X, w = c.w - IL_PAD_X * 2.0f, y = c.y + IL_PAD_Y, ar, ag, ab;
+#define SCAN_LN_H 58.0f
+#define SCAN_W 470.0f
+static void overlayScan(GfxRect c, GfxRect linha, float a) {
+  float ar, ag, ab, h = 14.0f + 40.0f + (scanN + 1) * SCAN_LN_H + 12.0f, x, y;
   int atual = scanAtual();
   ajustes_acento(&ar, &ag, &ab);
-  { TxtLinha t = txt_linha(TXT_ILHA_PERGUNTA, i18n("Match against"), 243, 242, 239, 255);
-    txt_desenhar_alpha(t, x0 + 10.0f, y, a); }
-  y += IL_TIT_H + 14.0f;
-  for (int i = 0; i <= scanN; i++, y += SED_LN_H + SED_LN_VAO) {
-    GfxRect r = { x0, y, w, SED_LN_H };
+  // The editor stays as it is; the card sits on the Scan again row's right
+  // side, centred on it, inside the body.
+  x = linha.x + linha.w - SCAN_W - 8.0f;
+  y = linha.y + linha.h * 0.5f - h * 0.5f;
+  if (y + h > c.y + c.h - IL_PE_H - 8.0f) y = c.y + c.h - IL_PE_H - 8.0f - h;
+  if (y < c.y + 8.0f) y = c.y + 8.0f;
+  plrui_material((GfxRect){ x, y, SCAN_W, h }, 18.0f, 1, a);
+  { TxtLinha t = txt_linha(TXT_G18R, i18n("Match against"), 243, 242, 239, 160);
+    txt_desenhar_alpha(t, x + 22.0f, y + 14.0f + (40.0f - (float)t.h) * 0.5f, a); }
+  y += 14.0f + 40.0f;
+  for (int i = 0; i <= scanN; i++, y += SCAN_LN_H) {
+    GfxRect r = { x + 8.0f, y, SCAN_W - 16.0f, SCAN_LN_H };
     int sel = i == scanFoco, cc = sel ? 255 : 219;
     char nome[96], val[64];
-    float dir = r.x + r.w - 18.0f;
+    float dir = r.x + r.w - 14.0f;
     scanRotulo(i, nome, sizeof nome, val, sizeof val);
-    if (sel) plrui_linha_foco(r, 18.0f, a);
-    gfx_icone((GfxRect){ r.x + 18.0f, r.y + (SED_LN_H - 24.0f) * 0.5f, 24.0f, 24.0f }, i ? "pl_audio-lines" : "aj_wand", 1, 1, 1, (sel ? 1.0f : 0.7f) * a);
-    { TxtLinha l = txt_linha(TXT_ILHA_FORTE, nome, cc, cc, cc - 2, 255);
-      txt_desenhar_alpha(l, r.x + 58.0f, r.y + (SED_LN_H - (float)l.h) * 0.5f, a); }
+    if (sel) plrui_linha_foco(r, 14.0f, a);
     if (i == atual) {
-      gfx_icone((GfxRect){ dir - 22.0f, r.y + (SED_LN_H - 22.0f) * 0.5f, 22.0f, 22.0f }, "pl_check", ar, ag, ab, a);
-      dir -= 22.0f + 12.0f;
+      gfx_icone((GfxRect){ dir - 22.0f, r.y + (SCAN_LN_H - 22.0f) * 0.5f, 22.0f, 22.0f }, "pl_check", ar, ag, ab, a);
+      dir -= 22.0f + 10.0f;
     }
     if (val[0]) {
-      TxtLinha l = txt_linha(TXT_G18R, val, cc, cc, cc - 2, sel ? 255 : 200);
-      txt_desenhar_alpha(l, dir - (float)l.w, r.y + (SED_LN_H - (float)l.h) * 0.5f, a);
+      TxtLinha l = txt_linha(TXT_G18R, val, cc, cc, cc - 2, sel ? 255 : 190);
+      txt_desenhar_alpha(l, dir - (float)l.w, r.y + (SCAN_LN_H - (float)l.h) * 0.5f, a);
+      dir -= (float)l.w + 12.0f;
     }
+    { TxtLinha l = txt_linha_corta(TXT_ILHA_FORTE, nome, cc, cc, cc - 2, 255, dir - (r.x + 16.0f));
+      txt_desenhar_alpha(l, r.x + 16.0f, r.y + (SCAN_LN_H - (float)l.h) * 0.5f, a); }
   }
-  { float yc = c.y + c.h - IL_PAD_Y - IL_PE_H * 0.5f;
-    const char *k[2] = { "OK", "Voltar" };
-    const char *rt[2] = { "Scan again", "Voltar" };
-    plrui_dicas(k, rt, 2, x0 + w - 10.0f, yc, 1, a); }
 }
 static void corpoSinc(GfxRect c, float a) {
   float x0 = c.x + IL_PAD_X, w = c.w - IL_PAD_X * 2.0f, y = c.y + IL_PAD_Y;
-  if (scanPag) { corpoScan(c, a); return; }
+  GfxRect linhaScan = { 0, 0, 0, 0 };
   int tipo[SED_MAXL], arg[SED_MAXL], n = sincLinhas(tipo, arg), o = audioext_offset_ms();
   int km[3], kp[3];
   float ar, ag, ab;
@@ -2905,6 +2910,7 @@ static void corpoSinc(GfxRect c, float a) {
   for (int i = 0; i < n; i++, y += SED_LN_H + SED_LN_VAO) {
     GfxRect r = { x0, y, w, SED_LN_H };
     int sel = i == sincFoco, c = sel ? 255 : 219, setas = 0, marca = 0, pagina = 0;
+    if (tipo[i] == SED_SCAN) linhaScan = r;
     char nome[96] = "", val[64] = "";
     const char *icone = NULL;
     switch (tipo[i]) {
@@ -2966,6 +2972,14 @@ static void corpoSinc(GfxRect c, float a) {
     }
     if (setas && sel)
       gfx_icone((GfxRect){ dir - 22.0f, r.y + (SED_LN_H - 22.0f) * 0.5f, 22.0f, 22.0f }, "pl_chevron-left", 1, 1, 1, a);
+  }
+  if (scanPag && linhaScan.w > 0) {
+    float yc = c.y + c.h - IL_PAD_Y - IL_PE_H * 0.5f;
+    const char *k[2] = { "OK", "Voltar" };
+    const char *rt[2] = { "Scan again", "Voltar" };
+    overlayScan(c, linhaScan, a);
+    plrui_dicas(k, rt, 2, x0 + w - 10.0f, yc, 1, a);
+    return;
   }
   { float yc = c.y + c.h - IL_PAD_Y - IL_PE_H * 0.5f;
     const char *k[3] = { "\xe2\x86\x90 \xe2\x86\x92", "OK", "Voltar" };
