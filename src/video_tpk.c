@@ -271,6 +271,18 @@ static struct {
   int legEstado;         // 0 not started, 1 running, 2 applied, 3 not possible
   Uint32 finoEm;         // when the refine starts (0 none pending)
   int finoFeito;
+  // RE-MATCH AFTER A SEEK (owner 18/11, log 13: a release cut another way,
+  // the offset changed by 1-3 s between stretches and a seek back kept the
+  // old one): the subtitle match again at the new place (ms, the points are
+  // in memory). Only a change of DOA_REMATCH_MIN_MS or more is applied: the
+  // subtitles' own precision is ~0.25 s against the audio-refined offset.
+  Uint32 rematchEm;      // when the re-match runs (0 none pending)
+  int rematch;           // the running subtitle match is a re-match
+  // The offset and speed the player's audio was last asked for with (a seek
+  // in place). A change under DOA_SEM_SEEK_MS at the same speed goes into the
+  // next segments only (owner 18/11, log 14: applying 5 ms by hand cost a
+  // seek in place, a 7.7 s segment and 8.4 s without playback).
+  int seekMs, seekPpm;
   // NO AUDIO ASKED (owner 17/11, 4K remux: the TV took video segments and
   // never one audio segment): one retry with the master's form 1, then the
   // audio that played before the pick.
@@ -1383,6 +1395,7 @@ static int doadorSessaoV(const char *conv, double pos, const char *motivo, int v
   memset(&dv, 0, sizeof dv);
   snprintf(dv.conv, sizeof dv.conv, "%s", conv);
   dv.ativo = 1; dv.gerVista = audioext_offset_geracao(); dv.variante = variante;
+  dv.seekMs = audioext_offset_ms(); dv.seekPpm = audioext_velocidade();
   audioext_tocando_definir(0);
   audioext_carregando_definir(1);
   printf("[doador] this source's picture with the audio of \"%.80s\" (offset %+d ms, track %d%s, languages %s) from %.1f s; why: %s\n",
@@ -1443,6 +1456,79 @@ static int doadorIniciar(double pos, const char *motivo) {
   }
   return 1;
 }
+// PRE-OPEN, THEN SWITCH (owner 18/11, log 13: each pick reopened the player
+// at once and it waited for the donor, 3.6-13.1 s without a picture; a cold
+// debrid node took 10.0 s and the 10 s deadline dropped the pick). The picked
+// version's header is read first in a thread (doa_preabrir: warms the debrid
+// node, DNS and TLS) while the audio in force keeps playing; the player
+// switches only once it answered. No answer in DOA_PREABRIR_PRAZO_MS: the
+// usual failure (a backup copy, the placeholder's retry, or the file's own
+// audio), and nothing playing was touched.
+#define DOA_PREABRIR_PRAZO_MS 25000
+typedef struct { char *url, *cab; atomic_int estado, refs; char motivo[192]; } PreJob;
+static PreJob *preJob;
+static unsigned preGer;
+static void preJobSoltar(PreJob *j) {
+  if (!j || atomic_fetch_sub(&j->refs, 1) != 1) return;
+  free(j->url); free(j->cab); free(j);
+}
+static void *preFio(void *u) {
+  PreJob *j = u;
+  char m[192];
+  int r = doa_preabrir(j->url, j->cab, DOA_PREABRIR_PRAZO_MS, m, sizeof m);
+  snprintf(j->motivo, sizeof j->motivo, "%s", m);
+  atomic_store(&j->estado, r == 1 ? 1 : r == -3 ? -3 : -1);
+  preJobSoltar(j);
+  return NULL;
+}
+static void preAbandonar(const char *porque) {
+  if (!preJob) return;
+  printf("[doador] pre-open dropped: %s\n", porque);
+  fflush(stdout);
+  preJobSoltar(preJob);   // the thread frees it when it ends
+  preJob = NULL;
+}
+// 1: switch now; 0: still opening (try again next tick); -1: it did not open
+// (already handed to audioext_falhou).
+static int prePronto(double p) {
+  unsigned g = audioext_pedido_geracao();
+  const char *u = audioext_url();
+  int e;
+  if (preJob && (preGer != g || strcmp(preJob->url, u ? u : ""))) preAbandonar("another pick");
+  if (!preJob) {
+    PreJob *j = calloc(1, sizeof *j);
+    pthread_t t;
+    if (!j || !(j->url = strdup(u ? u : "")) || !(j->cab = strdup(audioext_cabecalhos() ? audioext_cabecalhos() : ""))) {
+      if (j) { free(j->url); free(j); }
+      return 1;   // no memory for the thread: the old way
+    }
+    atomic_init(&j->estado, 0); atomic_init(&j->refs, 2);
+    if (pthread_create(&t, NULL, preFio, j) != 0) { free(j->url); free(j->cab); free(j); return 1; }
+    pthread_detach(t);
+    preJob = j; preGer = g;
+    audioext_carregando_definir(1);
+    printf("[doador] pick at %.1f s: \"%.80s\" opens in the background first; the audio in force keeps playing (up to %d s)\n",
+           p, audioext_nome(), DOA_PREABRIR_PRAZO_MS / 1000);
+    fflush(stdout);
+    return 0;
+  }
+  e = atomic_load(&preJob->estado);
+  if (!e) return 0;
+  if (e == 1) { preJobSoltar(preJob); preJob = NULL; return 1; }
+  { char t[240];
+    if (e == -3) snprintf(t, sizeof t, "%s", preJob->motivo);   // the placeholder: audioext retries it
+    else snprintf(t, sizeof t, i18n("the other source did not open (%s): this source's own audio"), preJob->motivo);
+    preJobSoltar(preJob); preJob = NULL;
+    printf("[doador] the pick did not open (%s): nothing playing was touched\n", t);
+    fflush(stdout);
+    audioext_carregando_definir(0);
+    audioext_falhou(t);
+    // A donor was playing and the mark is gone (no backup copy): the file's
+    // own audio, as the message says.
+    if (dv.ativo && !audioext_pedido(urlAtual)) extReabrirPend = 1;
+  }
+  return -1;
+}
 // A pick in the audio menu (another version, another track of it, a backup
 // copy, the placeholder's retry, or this file's own audio again): applied
 // where the picture is. Another donor while one plays: only the donor
@@ -1450,12 +1536,18 @@ static int doadorIniciar(double pos, const char *motivo) {
 static void extReabrir(void) {
   int quer;
   double p;
-  if (!urlAtual[0] || parado || emTrailer || terminou) { extReabrirPend = 0; return; }
+  if (!urlAtual[0] || parado || emTrailer || terminou) { extReabrirPend = 0; preAbandonar("playback ended"); return; }
   if (!dv.ativo && !pronto) return;   // the TV player is still loading this source
   if (cv.reabrindo) return;           // a reopen in flight: next tick
   extReabrirPend = 0;
   quer = audioext_pedido(urlAtual) && reconPermitida && doadorFonteServe();
   p = video_pos();
+  if (!quer) preAbandonar("this file's own audio picked");
+  if (quer) {
+    int g = prePronto(p);
+    if (!g) { extReabrirPend = 1; return; }
+    if (g < 0) return;
+  }
   if (dv.ativo && quer) {
     char conv[256];
     snprintf(conv, sizeof conv, "%s", dv.conv);
@@ -1491,6 +1583,10 @@ static void extReabrir(void) {
   doadorIniciar(p, "picked in the audio menu");
 }
 static void convDesistir(const char *motivo);
+#define DOA_REMATCH_SALTO_S 30.0
+#define DOA_REMATCH_ESPERA_MS 3000u
+#define DOA_REMATCH_MIN_MS 500
+#define DOA_SEM_SEEK_MS 40   /* about one AC3 frame; = AUDIOEXT_AUTO_MIN_MS */
 // WHICH AUDIO THE MATCH COMPARES (owner 18/11, doa_match_definir): the
 // title's original language (TMDB; an anime id without it: Japanese), the
 // file track picked in Audio sync > Scan again for this show, and one file
@@ -1563,7 +1659,22 @@ static void doadorBombear(void) {
     double k = 1, d = 0, conf = 0;
     char mt[160];
     int r = doadorleg_resultado(&k, &d, &conf, mt, sizeof mt);
-    if (r > 0) {
+    if (r > 0 && dv.rematch) {
+      int ms = 0, agoraMs = audioext_offset_ms();
+      dv.rematch = 0; dv.legEstado = 2;
+      if (doa_legendas_ms(k, d, &ms) && abs(ms - agoraMs) >= DOA_REMATCH_MIN_MS) {
+        printf("[doador] after the seek the subtitles put the donor at %+d ms (%+d ms from the offset in force): another edit here, "
+               "applied; the audio refines it\n", ms, ms - agoraMs);
+        dv.finoFeito = 0; dv.finoEm = 0;
+        doa_aplicar_legendas(k, d, conf);
+      } else
+        printf("[doador] after the seek the subtitles agree with the offset in force (%+d ms, %+d ms in force): kept\n", ms, agoraMs);
+      fflush(stdout);
+    } else if (r < 0 && dv.rematch) {
+      dv.rematch = 0; dv.legEstado = 3;
+      printf("[doador] after the seek no subtitle match (%s): the offset in force (%+d ms) is kept\n", mt, audioext_offset_ms());
+      fflush(stdout);
+    } else if (r > 0) {
       dv.legEstado = 2;
       doa_aplicar_legendas(k, d, conf);   // comes back as a match result (como 6): applied below
     } else if (r < 0) {
@@ -1571,6 +1682,17 @@ static void doadorBombear(void) {
       printf("[doador] subtitle match not possible (%s): the audio match does it all (~40 s)\n", mt);
       fflush(stdout);
       if (!doa_dopasuj_ativo()) { doadorMatchOpcoes(); doa_dopasuj(1); }
+    }
+  }
+  // The re-match after a seek: once the player plays again and no match runs.
+  if (dv.rematchEm && (int)(agora - dv.rematchEm) >= 0) {
+    if (dv.legEstado == 1 || doa_dopasuj_ativo() || !pronto || !tocando || !audioext_tocando() || doa_audio() < DOA_DOADOR(0))
+      dv.rematchEm = (agora + 1000u) ? agora + 1000u : 1u;
+    else {
+      dv.rematchEm = 0; dv.rematch = 1; dv.legEstado = 1;
+      printf("[doador] seek to %.1f s: the subtitle match again there (offset in force %+d ms)\n", video_pos(), audioext_offset_ms());
+      fflush(stdout);
+      doadorleg_iniciar(video_pos());
     }
   }
   // Second level: the audio refine, once the subtitle offset is in force
@@ -1609,7 +1731,7 @@ static void doadorBombear(void) {
     }
     if ((ev = doa_seguir_evento(&ms)) != 0) {
       audioext_seguir_evento(ev, ms);
-      if (ev == 4) { dv.gerVista = audioext_offset_geracao(); dv.mudouEm = 0; }
+      if (ev == 4) { dv.gerVista = audioext_offset_geracao(); dv.mudouEm = 0; dv.seekMs = audioext_offset_ms(); }
     } }
   // Playing the file's own track (the donor's failed, or picked in the TV's
   // menu): not loading any more.
@@ -1619,8 +1741,16 @@ static void doadorBombear(void) {
     if (g != dv.gerVista) { dv.gerVista = g; dv.mudouEm = agora ? agora : 1; } }
   if (dv.mudouEm && (int)(agora - dv.mudouEm) >= 700 && pronto) {
     double p = video_pos();
+    int ms = audioext_offset_ms();
     dv.mudouEm = 0;
-    doa_desloc(audioext_offset_ms());
+    doa_desloc(ms);
+    if (audioext_velocidade() == dv.seekPpm && abs(ms - dv.seekMs) < DOA_SEM_SEEK_MS) {
+      printf("[doador] offset %+d ms (%+d ms from the one the player asked with): under %d ms, the next segments carry it, no seek\n",
+             ms, ms - dv.seekMs, DOA_SEM_SEEK_MS);
+      fflush(stdout);
+      return;
+    }
+    dv.seekMs = ms; dv.seekPpm = audioext_velocidade();
     // The player holds segments with the old offset: a seek where it is makes
     // it drop them and ask again (spike: the TV test says whether it does).
     printf("[doador] offset %+d ms: seek in place at %.1f s so the player asks for the audio again\n", audioext_offset_ms(), p);
@@ -2150,7 +2280,7 @@ void video_bombear(void) {
       printf("[doador] scan again at %.1f s: subtitles first, then the audio (offset now %+d ms)\n", video_pos(), audioext_offset_ms());
       fflush(stdout);
       doadorleg_cancelar();
-      dv.autoFeito = 1; dv.legEstado = 1; dv.finoFeito = 0; dv.finoEm = 0;
+      dv.autoFeito = 1; dv.legEstado = 1; dv.finoFeito = 0; dv.finoEm = 0; dv.rematch = 0; dv.rematchEm = 0;
       doadorleg_iniciar(video_pos());
     } else audioext_dopasuj_resultado(0, NULL);
   }
@@ -2335,6 +2465,12 @@ void video_buscar(double s) {
     if (SDL_GetTicks() - envEm < LEG_ACOMODAR_MS * 2) seekNearWrite = 1;
   }
   if (cv.ativo) { cv.seekPend = 1; cv.seekAlvo = s; cv.seekEm = SDL_GetTicks(); }
+  // A jump with a donor playing: the subtitle match again there (dv.rematchEm;
+  // the in-place seeks of an offset change stay where they are).
+  if (dv.ativo && dv.autoFeito && fabs(s - video_pos()) >= DOA_REMATCH_SALTO_S) {
+    Uint32 em = SDL_GetTicks() + DOA_REMATCH_ESPERA_MS;
+    dv.rematchEm = em ? em : 1u;
+  }
   if (cv.ativo && cv.prog) {
     // Progressivo: o fluxo recomeca no quadro-chave antes de `s` (?t=).
     if (dts_tpk_url_em(s, cv.url, sizeof cv.url)) {

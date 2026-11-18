@@ -162,6 +162,7 @@ void doa_log(void) {}
 void doa_definir_casa(int (*casa)(const char *, const char *)) { (void)casa; }
 int  doa_diferenca(int *c, int *v, int *p) { (void)c; (void)v; (void)p; return 0; }
 int  doa_sondar(const char *u, const char *c, DoaSonda *o, int m) { (void)u; (void)c; (void)o; (void)m; return -1; }
+int  doa_preabrir(const char *u, const char *c, int p, char *m, size_t n) { (void)u; (void)c; (void)p; if (m && n) m[0] = 0; return 0; }
 void doa_dopasuj(int a) { (void)a; }
 int  doa_dopasuj_resultado(DoaDopasuj *o, int *a) { (void)o; (void)a; return 0; }
 int  doa_dopasuj_ativo(void) { return 0; }
@@ -172,6 +173,7 @@ int  doa_pedidos(void) { return 0; }
 int  doa_legendas(int f, DoaLegInfo *o, int m) { (void)f; (void)o; (void)m; return 0; }
 int  doa_legenda_tempos(int f, int k, double *t, int m) { (void)f; (void)k; (void)t; (void)m; return 0; }
 void doa_aplicar_legendas(double k, double d, double c) { (void)k; (void)d; (void)c; }
+int  doa_legendas_ms(double k, double d, int *ms) { (void)k; (void)d; (void)ms; return 0; }
 void doa_dopasuj_fino(void) {}
 void doa_match_definir(const char *o, const char *l, const char *c, int n, int v) { (void)o; (void)l; (void)c; (void)n; (void)v; }
 int  doa_faixas_arquivo(DoaRendicao *out, int max) { (void)out; (void)max; return 0; }
@@ -2639,6 +2641,75 @@ int doa_sondar(const char *url, const char *cab, DoaSonda *out, int max) {
   dts_engine_destroy(e);
   return n;
 }
+typedef struct {
+  pthread_mutex_t m;
+  pthread_cond_t c;
+  DtsEngine *e;
+  int feito, vencido, prazo;
+  atomic_int refs;
+} PreVigia;
+static void preSoltar(PreVigia *v) {
+  if (atomic_fetch_sub(&v->refs, 1) != 1) return;
+  pthread_mutex_destroy(&v->m); pthread_cond_destroy(&v->c);
+  free(v);
+}
+static void *preVigiar(void *u) {
+  PreVigia *v = u;
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += v->prazo / 1000;
+  ts.tv_nsec += (long)(v->prazo % 1000) * 1000000L;
+  if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+  pthread_mutex_lock(&v->m);
+  while (!v->feito)
+    if (pthread_cond_timedwait(&v->c, &v->m, &ts) == ETIMEDOUT) break;
+  if (!v->feito && v->e) { v->vencido = 1; dts_engine_cancel(v->e); }
+  pthread_mutex_unlock(&v->m);
+  preSoltar(v);
+  return NULL;
+}
+int doa_preabrir(const char *url, const char *cab, int prazo_ms, char *motivo, size_t n) {
+  PreVigia *v;
+  pthread_t t;
+  AVFormatContext *ic;
+  double t0 = agoraMs();
+  int r = 0, vigia;
+  if (motivo && n) motivo[0] = 0;
+  if (!url || !*url) { if (motivo && n) snprintf(motivo, n, "no address"); return 0; }
+  if (!(v = calloc(1, sizeof *v))) { if (motivo && n) snprintf(motivo, n, "out of memory"); return 0; }
+  pthread_mutex_init(&v->m, NULL); pthread_cond_init(&v->c, NULL);
+  v->prazo = prazo_ms > 1000 ? prazo_ms : 1000;
+  atomic_init(&v->refs, 1);
+  if (!(v->e = dts_engine_create())) { preSoltar(v); if (motivo && n) snprintf(motivo, n, "out of memory"); return 0; }
+  atomic_fetch_add(&v->refs, 1);
+  vigia = pthread_create(&t, NULL, preVigiar, v) == 0;
+  if (vigia) pthread_detach(t); else atomic_fetch_sub(&v->refs, 1);
+  if (dts_engine_open_demux(v->e, url, cab ? cab : "") < 0) {
+    pthread_mutex_lock(&v->m);
+    if (motivo && n) {
+      if (v->vencido) snprintf(motivo, n, "no answer in %d s", v->prazo / 1000);
+      else snprintf(motivo, n, "%s", dts_engine_error(v->e));
+    }
+    pthread_mutex_unlock(&v->m);
+  } else {
+    ic = dts_engine_avformat(v->e);
+    if (ic && ic->duration > 0 && ic->duration < (int64_t)DOA_CLIP_S * AV_TIME_BASE) {
+      if (motivo && n) snprintf(motivo, n, "External audio: this version is not ready on the debrid service yet (placeholder clip)");
+      r = -3;
+    } else r = 1;
+  }
+  pthread_mutex_lock(&v->m);
+  v->feito = 1;
+  pthread_cond_broadcast(&v->c);
+  { DtsEngine *e = v->e; v->e = NULL;   // the watchdog no longer touches it
+    pthread_mutex_unlock(&v->m);
+    dts_engine_destroy(e); }
+  printf("[doador] pre-open: %s in %.0f ms%s%s\n", r == 1 ? "it answered" : r == -3 ? "the placeholder clip" : "no",
+         agoraMs() - t0, r == 1 ? "" : ": ", r == 1 ? "" : (motivo ? motivo : ""));
+  fflush(stdout);
+  preSoltar(v);
+  return r;
+}
 void doa_dopasuj(int automatico) {
   Sessao *s = pegar();
   if (s) matchIniciar(s, automatico, 0);
@@ -2690,6 +2761,16 @@ void doa_aplicar_legendas(double k, double desloc, double conf) {
     fflush(stdout);
   }
   soltar(s);
+}
+int doa_legendas_ms(double k, double desloc, int *ms) {
+  Sessao *s = pegar();
+  int v = 0;
+  if (s && s->pronto && s->nfo > 1 && !s->fo[1].falhou && k > 0.9 && k < 1.1) {
+    if (ms) *ms = msDe(s, desloc, k);
+    v = 1;
+  }
+  soltar(s);
+  return v;
 }
 int doa_dopasuj_resultado(DoaDopasuj *out, int *automatico) {
   Sessao *s = pegar();

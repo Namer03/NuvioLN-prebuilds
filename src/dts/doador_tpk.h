@@ -109,6 +109,14 @@ int  doa_diferenca(int *corte, int *velocidade, int *ppm);
  * debrid's placeholder clip (under two minutes). */
 typedef struct { int si, canais; char codec[24], lingua[16], titulo[64]; } DoaSonda;
 int  doa_sondar(const char *url, const char *cab, DoaSonda *out, int max);
+/* PRE-OPEN (owner 18/11, log 13: a pick reopened the player at once and it
+ * waited for the donor, 3.6-13.1 s without a picture; a cold debrid node took
+ * 10.0 s and the 10 s deadline dropped it). Opens the donor's header the way
+ * the session will (warms the debrid node, DNS and TLS) while the audio in
+ * force keeps playing; blocking, run it in a thread. Past `prazo_ms` its
+ * reader is cancelled. 1 = it answered, -3 = the debrid placeholder clip,
+ * 0 = no answer / error (`motivo`). */
+int  doa_preabrir(const char *url, const char *cab, int prazo_ms, char *motivo, size_t n);
 /* MATCH AUTOMATICALLY (as the webOS engine, dts_match.inc): ~40 s of the
  * file's audio (taken from what the picture's reader downloads anyway, the
  * converter's tap) and of the donor's playing track (what its segments read)
@@ -167,6 +175,10 @@ int  doa_legenda_tempos(int fonte, int k, double *t, int max);
  * (container times). Handed to the app like a match (doa_dopasuj_resultado,
  * como 6, automatico 1): ms and ppm against the session's base. */
 void doa_aplicar_legendas(double k, double desloc, double conf);
+/* The same result as an offset in ms against the session's base, without
+ * applying it (a re-match after a seek compares it with the one in force).
+ * 0: no donor session ready. */
+int  doa_legendas_ms(double k, double desloc, int *ms);
 /* SECOND LEVEL: the audio match refining the offset in force (+-1 s, about
  * 40 s of playback, no wide search). como 7. After a subtitle match its
  * candidates are scored audio + subtitles (owner 18/11): within 0.5 s of the
