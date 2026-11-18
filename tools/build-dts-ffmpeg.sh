@@ -37,7 +37,10 @@ if [ "$TARGET" = tpk ]; then
   # file's PCM track as lossless FLAC in fMP4 (owner 17/11; PCM has no normal
   # HLS carrier) and the audio match can read it.
   DECODERS=$DECODERS,pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be,pcm_s32be
-  ENCODERS=$ENCODERS,flac
+  # eac3: the donor server pads a copied E-AC3 rendition with E-AC3 silence
+  # where the donor's audio has not started yet (owner 18/11: an empty first
+  # segment kept the TV player from starting).
+  ENCODERS=$ENCODERS,flac,eac3
   MUXERS=mpegts,matroska,mp4
   PARSERS=$PARSERS,mlp,ac3,opus,flac,vorbis,mpegaudio
   BSFS=$BSFS,truehd_core

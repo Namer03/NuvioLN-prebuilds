@@ -144,7 +144,22 @@ int  doa_pedidos(void);
  * source's own time). Read from the index prepFonte loads anyway: no request
  * more. Tracks with fewer than 20 points are left out. */
 #define DOA_LEG_MAX 32   /* every text track of a file (owner 17/11: the French one was the 13th) */
-typedef struct { char lingua[16], nome[64], codec[16]; int forcada, n; } DoaLegInfo;
+/* n: index points; falas: the lines they make once a burst (an ASS line drawn
+ * in pieces, karaoke, a typeset sign: starts within 0.15 s; 0.02 s for the
+ * others) counts as one, what the match compares (0 = not counted: n). */
+typedef struct { char lingua[16], nome[64], codec[16]; int forcada, n, falas; } DoaLegInfo;
+#define DOA_SURTO_ASS 0.15
+#define DOA_SURTO_SRT 0.02
+static inline int doa_falas(const double *t, int n, int ass) {
+  int i, m = 0;
+  double ult = -1e9;
+  for (i = 0; i < n; i++) {
+    if (t[i] < 0) continue;
+    if (m && t[i] - ult < (ass ? DOA_SURTO_ASS : DOA_SURTO_SRT)) continue;
+    ult = t[i]; m++;
+  }
+  return m;
+}
 int  doa_legendas(int fonte, DoaLegInfo *out, int max);
 /* Start times (s, sorted) of track `k` of doa_legendas; returns the count. */
 int  doa_legenda_tempos(int fonte, int k, double *t, int max);
@@ -158,4 +173,34 @@ void doa_aplicar_legendas(double k, double desloc, double conf);
  * subtitles' offset (their own precision) the audio decides; farther, the
  * subtitles' share fades. */
 void doa_dopasuj_fino(void);
+/* WHICH AUDIO THE MATCH COMPARES (owner 18/11). The tracks of one file are
+ * in sync with each other, so any pair of one language places the donor.
+ * Auto: the title's ORIGINAL language on both sides (jpn <-> jpn for anime:
+ * the track the picture was made with); a donor without it is compared with
+ * the file's track in its own language AND the file's original-language
+ * track, each candidate offset scored by both (a wrong dub in the file is
+ * outvoted); then the playing track's language, a shared language, any.
+ * `orig`: the title's original language ("ja"; "" unknown). `pedida*`: the
+ * file track picked in Audio sync > Scan again (language, codec, channels;
+ * lingua "" = Auto). `leve`: one file track only (Tizen 4-5.5, low memory;
+ * the original language first). Read when a match starts. */
+void doa_match_definir(const char *orig, const char *pedidaLingua, const char *pedidaCodec, int pedidaCanais, int leve);
+/* The playing file's own audio tracks in this session (offered or not), for
+ * the Scan again list: count, up to max. */
+int  doa_faixas_arquivo(DoaRendicao *out, int max);
+/* The choice above, pure (the host test): fx the session's audio tracks
+ * (fonte 0 the file, 1 the donor; ok = a decoder exists), tocando the donor
+ * track playing (index in fx). Fills siA (the file's track), siA2 (a second
+ * file track scored with it, -1 none), siD (the donor's track when not the
+ * playing one, -1 the playing one) and why. 0 = nothing to compare. */
+typedef struct { int fonte, si, ok, canais; char lingua[16], codec[24]; } DoaMatchFaixa;
+typedef struct { int siA, siA2, siD, como; char porque[160]; } DoaMatchEscolha;
+enum { DOA_MC_LINGUA = 0, DOA_MC_ORIGINAL, DOA_MC_DUAS, DOA_MC_PEDIDA, DOA_MC_COMUM, DOA_MC_OUTRA, DOA_MC_ORIG_LEVE };
+int  doa_match_escolher(const DoaMatchFaixa *fx, int n, int tocando, const char *orig, const char *pLingua, const char *pCodec,
+                        int pCanais, int leve, int (*casa)(const char *, const char *), DoaMatchEscolha *o);
+/* Two comparisons of the donor (against two file tracks): every candidate
+ * offset (within tol s of each other = one) gets both scores (0 where one
+ * comparison lacks it) and their mean; best mean first. Returns the count. */
+int  doa_match_somar(const double *oa, const double *sa, int na, const double *ob, const double *sb, int nb, double tol,
+                     double *o, double *media, double *scA, double *scB, int max);
 #endif

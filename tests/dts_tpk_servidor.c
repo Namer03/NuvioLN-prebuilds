@@ -311,6 +311,45 @@ static void testeDoador(int origem, const char *dir) {
     snprintf(nome, sizeof nome, "a%d_4.ts", iD);
     CONFERE(iD >= 0 && salvarPedido(pt, pp, nome, dir, "p4a.ts"), "PAL donor: segment 4 at the speed it took"); }
   doa_fechar();
+  // SILENCE (owner 18/11, log 2): a donor 3 s after the file. Segment 0 lies
+  // wholly before its first sample, segment 1 half: both carry silence (the
+  // copied E-AC3 and AAC in their own codec, the PAL one converted to AC3),
+  // never 0 packets.
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/doador.mkv", origem);
+  o.doador = doador; o.doador_ms = 3000; o.doador_ppm = 0; o.doador_lingua = "pol";
+  { int pt, iA = -1;
+    char pp[64];
+    CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(0) && partes(url, &pt, pp, sizeof pp), "silence: session with the donor 3 s later");
+    for (i = 0, iD = -1, n = doa_rendicoes(rd, 8); i < n; i++) {
+      if (rd[i].chave == DOA_DOADOR(0)) iD = i;
+      if (rd[i].chave == DOA_DOADOR(1)) iA = i;
+    }
+    snprintf(nome, sizeof nome, "a%d_0.ts", iD);
+    CONFERE(iD >= 0 && salvarPedido(pt, pp, nome, dir, "s0e.ts"), "silence: E-AC3 segment 0");
+    snprintf(nome, sizeof nome, "a%d_1.ts", iD);
+    CONFERE(iD >= 0 && salvarPedido(pt, pp, nome, dir, "s1e.ts"), "silence: E-AC3 segment 1");
+    snprintf(nome, sizeof nome, "a%d_0.ts", iA);
+    CONFERE(iA >= 0 && salvarPedido(pt, pp, nome, dir, "s0a.ts"), "silence: AAC segment 0"); }
+  doa_fechar();
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/pal.mkv", origem);
+  o.doador = doador; o.doador_ms = 3000; o.doador_ppm = 41667;
+  { int pt;
+    char pp[64];
+    CONFERE(doaComeca(&o, url, sizeof url) == DOA_DOADOR(0) && partes(url, &pt, pp, sizeof pp), "silence: PAL donor 3 s later");
+    for (i = 0, iD = -1, n = doa_rendicoes(rd, 8); i < n; i++) if (rd[i].chave == DOA_DOADOR(0)) iD = i;
+    snprintf(nome, sizeof nome, "a%d_0.ts", iD);
+    CONFERE(iD >= 0 && salvarPedido(pt, pp, nome, dir, "s0p.ts"), "silence: PAL (converted) segment 0"); }
+  doa_fechar();
+  o.doador_ms = 0; o.doador_ppm = 0;
+  // The file's own tracks for Scan again.
+  { DoaRendicao fa[4];
+    snprintf(doador, sizeof doador, "http://127.0.0.1:%d/doador.mkv", origem);
+    o.doador = doador;
+    doaComeca(&o, url, sizeof url);
+    n = doa_faixas_arquivo(fa, 4);
+    CONFERE(n == 1 && fa[0].fonte == 0 && !strcmp(fa[0].codec, "dts") && fa[0].canais == 6,
+            "Scan again list: the file's own track as the file has it (%d: %s %d ch)", n, n ? fa[0].codec : "", n ? fa[0].canais : 0); }
+  doa_fechar();
   // The audio menu's track list of another version.
   { DoaSonda t[8];
     snprintf(doador, sizeof doador, "http://127.0.0.1:%d/doador.mkv", origem);
@@ -389,6 +428,61 @@ static void testeDopasuj(int origem, const char *dir) {
   dts_tpk_fechar();
   sleep(1);
 }
+// WHICH AUDIO (owner 18/11). 1: the original language (ja) on both sides,
+// the donor playing its English (1.5 s off) while its Japanese (3 s) is read
+// from the same downloads: -3000. 2: a donor with English only against a
+// file whose English is 0.8 s off: both file tracks scored, the original's
+// pick wins: -3000.
+static int casaTeste(const char *a, const char *b) { return !strcasecmp(a, b) || (!strcasecmp(a, "jpn") && !strcasecmp(b, "ja")) || (!strcasecmp(a, "ja") && !strcasecmp(b, "jpn")); }
+static int rodarMatch(int origem, const char *doadorArq, const char *dir, const char *nomeT, int *ms) {
+  char fonte[200], doador[200], conv[300], url[300], pref[64], c[200], nome[40], vpref[64];
+  int porta, vporta, i, iD = -1, n, r = 0, au = -1;
+  DoaAbrir o;
+  DoaRendicao rd[8];
+  DoaDopasuj res;
+  Resp rp;
+  char *v = NULL;
+  snprintf(fonte, sizeof fonte, "http://127.0.0.1:%d/m2.mkv", origem);
+  snprintf(doador, sizeof doador, "http://127.0.0.1:%d/%s", origem, doadorArq);
+  if (!dts_tpk_abrir(fonte, "", DTS_REMUX_NO_AUDIO, 0, DTSTPK_HLS, 0, conv, sizeof conv)) return 0;
+  memset(&o, 0, sizeof o);
+  o.video = conv; o.orig = fonte; o.cab = ""; o.doador = doador; o.doador_cab = ""; o.doador_nome = nomeT;
+  o.doador_lingua = "eng"; o.doador_padrao = 1; o.doador_ms = -2000;
+  doa_definir_casa(casaTeste);
+  doa_match_definir("ja", "", "", 0, 0);
+  if (!doa_abrir(&o, url, sizeof url) || !partes(url, &porta, pref, sizeof pref)) return 0;
+  snprintf(c, sizeof c, "%smaster.m3u8", pref);
+  if (pedir(porta, c, NULL, &rp) || rp.status != 200) return 0;
+  if (rp.corpo) v = strstr((char *)rp.corpo, "\nhttp://127.0.0.1:");
+  if (!v || !partes(v + 1, &vporta, vpref, sizeof vpref)) { free(rp.corpo); return 0; }
+  free(rp.corpo);
+  n = doa_rendicoes(rd, 8);
+  for (i = 0; i < n; i++) if (rd[i].chave == doa_audio()) iD = i;
+  if (iD < 0 || doa_audio() < DOA_DOADOR(0)) return 0;
+  doa_dopasuj(0);
+  for (i = 0; i < 40 && !(r = doa_dopasuj_resultado(&res, &au)); i++) {
+    snprintf(nome, sizeof nome, "seg%d.ts", i);
+    salvarPedido(vporta, vpref, nome, dir, "v.ts");
+    snprintf(nome, sizeof nome, "a%d_%d.ts", iD, i);
+    salvarPedido(porta, pref, nome, dir, "a.ts");
+  }
+  for (i = 0; i < 300 && !r; i++) { usleep(100000); r = doa_dopasuj_resultado(&res, &au); }
+  *ms = r == 1 ? res.ms : 0;
+  doa_fechar();
+  dts_tpk_fechar();
+  doa_match_definir("", "", "", 0, 0);
+  doa_definir_casa(NULL);
+  sleep(1);
+  return r == 1;
+}
+static void testeFaixasMatch(int origem, const char *dir) {
+  int ms = 0;
+  CONFERE(rodarMatch(origem, "md3.mkv", dir, "Both languages", &ms) && ms > -3060 && ms < -2940,
+          "match tracks: Japanese against Japanese while the English plays: %d ms (right: -3000; the English would give -1500)", ms);
+  CONFERE(rodarMatch(origem, "md2.mkv", dir, "English only", &ms) && ms > -3060 && ms < -2940,
+          "match tracks: English-only donor, the file's two tracks scored: %d ms (right: -3000; the file's English alone gives -2200)", ms);
+}
+
 static double agora(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -604,6 +698,7 @@ int main(int argc, char **argv) {
   else if (!strcmp(t, "sovideo")) testeSoVideo(origem, argv[3]);
   else if (!strcmp(t, "doador")) testeDoador(origem, argv[3]);
   else if (!strcmp(t, "dopasuj")) testeDopasuj(origem, argv[3]);
+  else if (!strcmp(t, "faixasmatch")) testeFaixasMatch(origem, argv[3]);
   else { fprintf(stderr, "unknown test %s\n", t); return 2; }
   printf("%s: %d failure(s)\n", t, falhas);
   return falhas ? 1 : 0;

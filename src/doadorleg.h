@@ -26,13 +26,19 @@ void doadorleg_cancelar(void);
 int  doadorleg_resultado(double *k, double *desloc, double *conf, char *motivo, size_t n);
 
 /* Pure parts, for the test. The pairs worth trying (file track, donor track),
- * best first: same language, then the same kind (SDH with SDH, forced never),
- * the point counts closest, SRT before ASS. Returns how many (up to max). */
+ * best first: same language (English first), then the same kind (SDH with
+ * SDH, forced never), the line counts closest, SRT before ASS. Returns how
+ * many (up to max). */
 int  doadorleg_pares(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb,
                      int (*casa)(const char *, const char *), int *ia, int *ib, int max);
-/* When no language is shared: pairs in two languages (forced never, line
- * counts within 2x), best first. The match then needs confidence 0.90. */
+/* Pairs in two languages (forced never), best first; tried after the shared-
+ * language pairs, with confidence 0.90 needed. */
 int  doadorleg_pares_cruzados(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb, int *ia, int *ib, int max);
+/* No line-count gate (owner 18/11): the two tracks' line counts (DoaLegInfo
+ * falas, bursts merged) as smaller/larger, and the confidence a pair needs:
+ * 0.90 in two languages or over 2x apart, else 0 (the engine's own bar). */
+double doadorleg_razao(const DoaLegInfo *a, const DoaLegInfo *b);
+double doadorleg_conf_min(const DoaLegInfo *a, const DoaLegInfo *b, int cruzado);
 /* Start times -> a line from the two-point map. `donorDe(t)` = the donor's
  * time at the file's t. Fills k (file seconds per donor second) and desloc. */
 int  doadorleg_reta(double t1, double d1, double t2, double d2, double *k, double *desloc);
@@ -46,4 +52,12 @@ int  doadorleg_alinhar(const double *ta, int na, int assA, const char *la, const
 int  doadorleg_alinhar_v(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                          double pos, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
                          int (*cancelar)(void *), void *u);
+/* Phrase starts: only the starts `gap` s after the one kept before (owner
+ * 18/11: a fansub's ASS against CR's). Returns the count written to o. */
+int  doadorleg_frases(const double *t, int n, double gap, double *o);
+/* One pair as the match tries it: the plain match, then (an ASS side, or line
+ * counts under 0.8 of each other) the phrase starts with confidence 0.90. */
+int  doadorleg_alinhar_par(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                           double pos, double confMin, int mesmaVel, double razao, double *k, double *desloc, double *conf,
+                           char *motivo, size_t mn, int (*cancelar)(void *), void *u);
 #endif

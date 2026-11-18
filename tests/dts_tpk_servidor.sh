@@ -51,6 +51,21 @@ ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 -f lavfi -i "aevalsrc='$(ech
   -c:a ac3 -ac 2 -metadata:s:a:0 language=eng "$work/src/md.mkv"
 # 150 s at 64x64 for the audio-queue cap: the test binary moves the audio 70 s
 # ahead of its video below, so up to 80 s of AC3 wait for their video.
+# WHICH AUDIO THE MATCH COMPARES (owner 18/11): m2.mkv has the picture's
+# Japanese and an English dub 0.8 s off (a wrong dub); md2.mkv only English,
+# 3 s later than the picture; md3.mkv Japanese 3 s later and an English 1.5 s
+# later (a dub that is off the other way).
+ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 -f lavfi -i "aevalsrc='$(echo "$som" | sed 's/T/t/g')':s=48000" \
+  -f lavfi -i "aevalsrc='$(echo "$som" | sed 's/T/(t-0.8)/g')':s=48000" -t 90 \
+  -map 0:v -map 1:a -map 2:a -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
+  -c:a ac3 -ac 2 -metadata:s:a:0 language=jpn -metadata:s:a:1 language=eng "$work/src/m2.mkv"
+ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 -f lavfi -i "aevalsrc='$(echo "$som" | sed 's/T/(t-3)/g')':s=48000" -t 93 \
+  -map 0:v -map 1:a -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
+  -c:a ac3 -ac 2 -metadata:s:a:0 language=eng "$work/src/md2.mkv"
+ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 -f lavfi -i "aevalsrc='$(echo "$som" | sed 's/T/(t-3)/g')':s=48000" \
+  -f lavfi -i "aevalsrc='$(echo "$som" | sed 's/T/(t-1.5)/g')':s=48000" -t 93 \
+  -map 0:v -map 1:a -map 2:a -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
+  -c:a ac3 -ac 2 -metadata:s:a:0 language=jpn -metadata:s:a:1 language=eng "$work/src/md3.mkv"
 ffmpeg -v error -f lavfi -i testsrc2=s=64x64:r=24 -f lavfi -i "sine=f=440:r=48000" -t 150 \
   -filter_complex "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0[a]" -map 0:v -map "[a]" \
   -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
@@ -128,6 +143,17 @@ ini() { ffprobe -v error -select_streams "$2" -show_entries stream=start_time -o
 cod() { ffprobe -v error -select_streams a -show_entries stream=codec_name,channels -of csv=p=0 "$1" | head -1; }
 perto() { awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN{x=a-b; if (x<0) x=-x; exit !(x<=t)}'; }
 bipe() { ffmpeg -v info -copyts -i "$1" -map 0:a:0 -af silencedetect=n=-40dB:d=0.1 -f null - 2>&1 | sed -n 's/.*silence_end: \([0-9.]*\).*/\1/p' | head -1; }
+npk() { ffprobe -v error -select_streams a:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$1" 2>/dev/null | head -1; }
+ainicio() { ffprobe -v error -select_streams a:0 -show_entries stream=start_time -of csv=p=0 "$1" 2>/dev/null | head -1; }
+for f in s0e s1e s0a s0p; do
+  check "silence: $f.ts carries audio ($(npk "$d/$f.ts") packets, $(cod "$d/$f.ts"), from $(ainicio "$d/$f.ts") s)" \
+    "[ \"\$(npk '$d/$f.ts')\" -gt 10 ] 2>/dev/null"
+done
+check "silence: E-AC3 stays E-AC3 ($(cod "$d/s0e.ts"))" "[ \"\$(cod '$d/s0e.ts')\" = 'eac3,6' ]"
+check "silence: segment 0 starts at the file's 0 s (+10 s) ($(ainicio "$d/s0e.ts"))" "perto '$(ainicio "$d/s0e.ts")' 10 0.05"
+check "silence: E-AC3 silence then the donor's own frames decode cleanly" "[ -z \"\$(ffmpeg -v error -i '$d/s1e.ts' -f null - 2>&1)\" ]"
+check "silence: AAC silence decodes cleanly" "[ -z \"\$(ffmpeg -v error -i '$d/s0a.ts' -f null - 2>&1)\" ]"
+check "silence: the log says so" "grep -q 'had no audio: [0-9]* eac3 frame(s) of silence' '$work/t8.log'"
 check "donor: Polish E-AC3 is the DEFAULT rendition, named after its source" \
   "grep -q 'NAME=\"Polish (eac3 6ch) from Test donor\",LANGUAGE=\"pol\",DEFAULT=YES' '$d/dm.m3u8'"
 check "donor: E-AC3 5.1 copied ($(cod "$d/d4.ts")), segment 4 at 18 s ($(ini "$d/d4.ts" a))" "[ '$(cod "$d/d4.ts")' = 'eac3,6' ] && perto $(ini "$d/d4.ts" a) 18 0.05"
@@ -160,6 +186,12 @@ mkdir -p "$work/t9"
 "$work/test" "$port" dopasuj "$work/t9" > "$work/t9.log" 2>&1 || fail=1
 grep -E '^(ok|FAIL)' "$work/t9.log"
 check "match: no URL of either file in the log" "! grep -q 'md.mkv\\|/m.mkv' '$work/t9.log'"
+mkdir -p "$work/t10"
+"$work/test" "$port" faixasmatch "$work/t10" > "$work/t10.log" 2>&1 || fail=1
+grep -E '^(ok|FAIL)' "$work/t10.log"
+grep -E '\[doador\] match (tracks|\(two tracks\))' "$work/t10.log" | sed 's/^/     /'
+check "match tracks: original on both sides, the donor's Japanese from the generator's reads" "grep -q 'the original language (ja) on both sides' '$work/t10.log' && grep -q \"from the donor's reads, not the playing track\" '$work/t10.log'"
+check "match tracks: two file tracks scored together" "grep -q 'match (two tracks): ' '$work/t10.log'"
 
 cp "$work/t1.log" "$work/t3.log" "$work/t4.log" "$work/t5.log" "$work/t6.log" "${DTS_TPK_LOGS:-$work}/" 2>/dev/null || true
 if [ "$fail" != 0 ]; then echo "--- t1.log"; grep '\[dts-tpk\]' "$work/t1.log" | tail -30; echo "--- t3.log"; tail -20 "$work/t3.log"; echo "--- t4.log"; grep -v '^\[dts-tpk\] #' "$work/t4.log" | tail -20; fi

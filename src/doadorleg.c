@@ -13,12 +13,13 @@
 #include <string.h>
 #include <strings.h>
 
-#define DL_PARES   3        // pairs tried, best first
+#define DL_PARES   4        // pairs tried, best first
 #define DL_MAXPTS  6000     // points per track (the engine takes up to 8000 cues)
 #define DL_FIM_MAX 4.0      // an estimated end: the next start, at most this after its own
 // Pairs in two different languages (owner 17/11: the match compares when lines
-// start, and translations of one release mostly follow the same speech): only
-// when no language is shared, and only with this much confidence.
+// start, and translations of one release mostly follow the same speech): after
+// the shared-language ones, and only with this much confidence. The same bar
+// for a pair whose line counts are over 2x apart (owner 18/11: no count gate).
 #define DL_CONF_CRUZADO 0.90
 
 static int casaPadrao(const char *a, const char *b) { return a[0] && b[0] && !strcasecmp(a, b); }
@@ -30,6 +31,24 @@ static int contem(const char *h, const char *n) {
 static int ehSdh(const DoaLegInfo *l) { return contem(l->nome, "sdh") || contem(l->nome, "hearing") || contem(l->nome, "cc"); }
 static int ehAss(const DoaLegInfo *l) { return !strcmp(l->codec, "ass") || !strcmp(l->codec, "ssa"); }
 
+// The lines a track has once its bursts are one (DoaLegInfo.falas; n when
+// not counted).
+static int falasDe(const DoaLegInfo *l) { return l->falas > 0 ? l->falas : l->n; }
+static int ehIngles(const char *l) {
+  return !strcasecmp(l, "en") || !strcasecmp(l, "eng") || !strncasecmp(l, "en-", 3) || !strncasecmp(l, "en_", 3);
+}
+double doadorleg_razao(const DoaLegInfo *a, const DoaLegInfo *b) {
+  int x = falasDe(a), y = falasDe(b);
+  if (x <= 0 || y <= 0) return 0;
+  return x > y ? (double)y / x : (double)x / y;
+}
+// NO LINE-COUNT GATE (owner 18/11, log 4: a fansub's English ASS, 1368
+// points, against a CR English ASS, 395, and a French ASS, 673, made "0
+// pairs"): every pair of full tracks is tried, the closest line counts (after
+// the bursts are merged) first; the match's own confidence decides, and a
+// pair over 2x apart needs DL_CONF_LONGE (doadorleg_conf_min).
+// ENGLISH FIRST (owner 18/11, "line up the English vs English subtitles and
+// adjust from there"): an English pair before any other shared language.
 int doadorleg_pares(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb,
                     int (*casa)(const char *, const char *), int *ia, int *ib, int max) {
   struct { int i, j; double p; } c[64], t;
@@ -43,10 +62,10 @@ int doadorleg_pares(const DoaLegInfo *a, int na, const DoaLegInfo *b, int nb,
       if (a[i].lingua[0] || b[j].lingua[0]) {
         if (!a[i].lingua[0] || !b[j].lingua[0] || !(casa(a[i].lingua, b[j].lingua) || casa(b[j].lingua, a[i].lingua))) continue;
       }
-      r = a[i].n > b[j].n ? (double)b[j].n / a[i].n : (double)a[i].n / b[j].n;   // 1 = as many lines
-      if (r < 0.5) continue;   // one of them is not the whole dialogue
+      r = doadorleg_razao(&a[i], &b[j]);   // 1 = as many lines
       c[n].i = i; c[n].j = j;
-      c[n].p = r * 10.0 + (ehSdh(&a[i]) == ehSdh(&b[j]) ? 5.0 : 0.0) + (!ehAss(&a[i]) && !ehAss(&b[j]) ? 2.0 : 0.0) +
+      c[n].p = (ehIngles(a[i].lingua) || ehIngles(b[j].lingua) ? 100.0 : 0.0) + r * 10.0 +
+               (ehSdh(&a[i]) == ehSdh(&b[j]) ? 5.0 : 0.0) + (!ehAss(&a[i]) && !ehAss(&b[j]) ? 2.0 : 0.0) +
                (!a[i].lingua[0] ? -3.0 : 0.0);
       n++;
     }
@@ -62,17 +81,20 @@ int doadorleg_pares_cruzados(const DoaLegInfo *a, int na, const DoaLegInfo *b, i
     for (j = 0; j < nb && n < 64; j++) {
       double r;
       if (a[i].forcada || b[j].forcada) continue;
-      r = a[i].n > b[j].n ? (double)b[j].n / a[i].n : (double)a[i].n / b[j].n;
-      if (r < 0.5) continue;
+      r = doadorleg_razao(&a[i], &b[j]);
       c[n].i = i; c[n].j = j;
       // Closest line counts first; SDH with SDH; SRT before ASS (typeset ASS
-      // splits a line into many starts).
-      c[n].p = r * 10.0 + (ehSdh(&a[i]) == ehSdh(&b[j]) ? 3.0 : 0.0) + (!ehAss(&a[i]) && !ehAss(&b[j]) ? 2.0 : 0.0);
+      // splits a line into many starts); English on one side next.
+      c[n].p = r * 10.0 + (ehSdh(&a[i]) == ehSdh(&b[j]) ? 3.0 : 0.0) + (!ehAss(&a[i]) && !ehAss(&b[j]) ? 2.0 : 0.0) +
+               (ehIngles(a[i].lingua) || ehIngles(b[j].lingua) ? 1.0 : 0.0);
       n++;
     }
   for (i = 1; i < n; i++) for (k = i; k > 0 && c[k].p > c[k - 1].p; k--) { t = c[k]; c[k] = c[k - 1]; c[k - 1] = t; }
   for (i = 0; i < n && i < max; i++) { ia[i] = c[i].i; ib[i] = c[i].j; }
   return n < max ? n : max;
+}
+double doadorleg_conf_min(const DoaLegInfo *a, const DoaLegInfo *b, int cruzado) {
+  return cruzado || doadorleg_razao(a, b) < 0.5 ? DL_CONF_CRUZADO : 0.0;
 }
 
 int doadorleg_reta(double t1, double d1, double t2, double d2, double *k, double *desloc) {
@@ -115,7 +137,7 @@ static LegendaDocumento *documento(const double *t, int n, int ass, const char *
   if (!v) return NULL;
   for (i = 0; i < n; i++) {
     double ini = t[i], fim;
-    if (ini < 0 || (m && ini - v[m - 1].inicio < (ass ? 0.15 : 0.02))) continue;
+    if (ini < 0 || (m && ini - v[m - 1].inicio < (ass ? DOA_SURTO_ASS : DOA_SURTO_SRT))) continue;
     fim = i + 1 < n ? t[i + 1] - 0.05 : ini + 2.0;
     if (fim > ini + DL_FIM_MAX) fim = ini + DL_FIM_MAX;
     if (fim < ini + 0.3) fim = ini + 0.3;
@@ -135,7 +157,7 @@ static LegendaDocumento *documento(const double *t, int n, int ass, const char *
 }
 
 typedef struct {
-  int ia[DL_PARES], ib[DL_PARES], n, cruzado;
+  int ia[DL_PARES], ib[DL_PARES], n, cruzado[DL_PARES], nCruz;
   DoaLegInfo a[DOA_LEG_MAX], b[DOA_LEG_MAX];
   double *ta[DL_PARES], *tb[DL_PARES]; int na[DL_PARES], nb[DL_PARES];
   double pos;
@@ -197,8 +219,8 @@ static int alinharMin(const double *ta, int na, int assA, const char *la, const 
          r.estado == AUTOSYNC_ACCEPTED ? "ACCEPTED" : "not accepted", autosync_motivo(r.motivo), r.offsetMs, r.escala, r.trechos,
          r.confianca, r.cobertura, (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
   if (r.estado == AUTOSYNC_ACCEPTED && r.confianca < confMin) {
-    snprintf(motivo, mn, "two languages: confidence %.2f under %.2f", r.confianca, confMin);
-    printf("[doadorleg] two languages: confidence %.2f is under the %.2f they need, not used\n", r.confianca, confMin);
+    snprintf(motivo, mn, "confidence %.2f under the %.2f this pair needs", r.confianca, confMin);
+    printf("[doadorleg] confidence %.2f is under the %.2f this pair needs (two languages or line counts over 2x apart), not used\n", r.confianca, confMin);
   } else if (r.estado == AUTOSYNC_ACCEPTED) {
     // Two points of the file's time, from the playhead on (another cut: the
     // piece the viewer is in), mapped to the donor's.
@@ -220,6 +242,42 @@ static int alinharMin(const double *ta, int na, int assA, const char *la, const 
   return achou;
 }
 
+// PHRASE STARTS (owner 18/11, log 4: a fansub's ASS against CR's): when the
+// two tracks were written apart (one splits a line in two, carries typeset
+// signs or karaoke, the other joins lines), their starts disagree too often
+// for the engine. What both still share is where a phrase starts after a
+// pause: both tracks keep only starts DL_FRASE_S after the one kept before.
+// Tried after the plain match fails, with confidence 0.90 needed (synthetic
+// fansub/CR timelines: 59 of 60 found, none wrong, at 2.5 s).
+#define DL_FRASE_S 2.5
+int doadorleg_frases(const double *t, int n, double gap, double *o) {
+  int i, m = 0;
+  double u = -1e18;
+  for (i = 0; i < n; i++) {
+    if (t[i] < 0 || t[i] - u < gap) continue;
+    o[m++] = t[i]; u = t[i];
+  }
+  return m;
+}
+int doadorleg_alinhar_par(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                          double pos, double confMin, int mesmaVel, double razao, double *k, double *desloc, double *conf,
+                          char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
+  double *fa, *fb;
+  int achou = alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, confMin, mesmaVel, k, desloc, conf, motivo, mn, cancelar, u), ma, mb;
+  if (achou || (cancelar && cancelar(u)) || !(assA || assB || razao < 0.8)) return achou;
+  fa = malloc(sizeof *fa * (size_t)(na > 0 ? na : 1)); fb = malloc(sizeof *fb * (size_t)(nb > 0 ? nb : 1));
+  if (fa && fb) {
+    char m2[120] = "";
+    ma = doadorleg_frases(ta, na, DL_FRASE_S, fa); mb = doadorleg_frases(tb, nb, DL_FRASE_S, fb);
+    printf("[doadorleg] phrase starts only (%.1f s apart): file %d / donor %d, confidence 0.90 needed\n", DL_FRASE_S, ma, mb);
+    achou = alinharMin(fa, ma, 0, la, fb, mb, 0, lb, pos, confMin > DL_CONF_CRUZADO ? confMin : DL_CONF_CRUZADO, mesmaVel, k, desloc,
+                       conf, m2, sizeof m2, cancelar, u);
+    if (!achou) { char m1[64]; snprintf(m1, sizeof m1, "%s", motivo); snprintf(motivo, mn, "%.50s; phrase starts: %.50s", m1, m2); }
+  }
+  free(fa); free(fb);
+  return achou;
+}
+
 static void *fio(void *u) {
   Pedido *p = u;
   int i, achou = 0;
@@ -228,10 +286,13 @@ static void *fio(void *u) {
   for (i = 0; i < p->n && !achou && !cancelado((void *)(uintptr_t)p->ger); i++) {
     const DoaLegInfo *a = &p->a[p->ia[i]], *b = &p->b[p->ib[i]];
     char m[120] = "";
-    printf("[doadorleg] pair %d%s: file %s %s \"%.30s\" / donor %s %s \"%.30s\"\n", i + 1, p->cruzado ? " (two languages)" : "",
-           a->lingua[0] ? a->lingua : "und", a->codec, a->nome, b->lingua[0] ? b->lingua : "und", b->codec, b->nome);
-    achou = alinharMin(p->ta[i], p->na[i], ehAss(a), a->lingua, p->tb[i], p->nb[i], ehAss(b), b->lingua, p->pos,
-                       p->cruzado ? DL_CONF_CRUZADO : 0.0, p->mesmaVel, &k, &d, &conf, m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
+    double cm = doadorleg_conf_min(a, b, p->cruzado[i]);
+    printf("[doadorleg] pair %d%s: file %s %s \"%.30s\" (%d lines) / donor %s %s \"%.30s\" (%d lines)%s\n", i + 1,
+           p->cruzado[i] ? " (two languages)" : "", a->lingua[0] ? a->lingua : "und", a->codec, a->nome, a->falas,
+           b->lingua[0] ? b->lingua : "und", b->codec, b->nome, b->falas,
+           cm > 0 && !p->cruzado[i] ? " (line counts over 2x apart: confidence 0.90 needed)" : "");
+    achou = doadorleg_alinhar_par(p->ta[i], p->na[i], ehAss(a), a->lingua, p->tb[i], p->nb[i], ehAss(b), b->lingua, p->pos,
+                                  cm, p->mesmaVel, doadorleg_razao(a, b), &k, &d, &conf, m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
     if (!achou) snprintf(motivo, sizeof motivo, "pair %d (%s %s / %s %s): %s", i + 1, a->lingua, a->codec, b->lingua, b->codec, m);
   }
   terminar(p->ger, achou, k, d, conf, achou ? "" : motivo);
@@ -252,13 +313,23 @@ void doadorleg_iniciar(double pos) {
     p->mesmaVel = doa_diferenca(&corte, &vel, &ppm) && !vel; }
   na = doa_legendas(0, p->a, DOA_LEG_MAX);
   nb = doa_legendas(1, p->b, DOA_LEG_MAX);
+  // Shared-language pairs first (English first), then pairs in two
+  // languages fill what is left of DL_PARES.
   p->n = doadorleg_pares(p->a, na, p->b, nb, ling_casa, p->ia, p->ib, DL_PARES);
-  if (!p->n && na && nb) {
-    p->n = doadorleg_pares_cruzados(p->a, na, p->b, nb, p->ia, p->ib, DL_PARES);
-    p->cruzado = p->n > 0;
+  for (i = 0; i < p->n; i++) p->cruzado[i] = 0;
+  if (p->n < DL_PARES && na && nb) {
+    int ca[DL_PARES * 4], cb[DL_PARES * 4], nc = doadorleg_pares_cruzados(p->a, na, p->b, nb, ca, cb, DL_PARES * 4), j, q;
+    for (j = 0; j < nc && p->n < DL_PARES; j++) {
+      int ja = 0;
+      if (p->a[ca[j]].lingua[0] && p->b[cb[j]].lingua[0] &&
+          (ling_casa(p->a[ca[j]].lingua, p->b[cb[j]].lingua) || ling_casa(p->b[cb[j]].lingua, p->a[ca[j]].lingua))) continue;
+      for (q = 0; q < p->n; q++) if (p->ia[q] == ca[j] && p->ib[q] == cb[j]) ja = 1;
+      if (ja) continue;
+      p->ia[p->n] = ca[j]; p->ib[p->n] = cb[j]; p->cruzado[p->n++] = 1; p->nCruz++;
+    }
   }
   printf("[doadorleg] subtitle match: the file has %d indexed text track(s), the donor %d: %d pair(s) to try%s\n", na, nb, p->n,
-         p->cruzado ? " (no shared language: pairs in two languages, confidence 0.90 needed)" : "");
+         p->nCruz ? " (pairs in two languages last, confidence 0.90 needed)" : "");
   fflush(stdout);
   for (i = 0; i < p->n; i++) {
     p->ta[i] = malloc(sizeof(double) * DL_MAXPTS); p->tb[i] = malloc(sizeof(double) * DL_MAXPTS);
@@ -266,7 +337,7 @@ void doadorleg_iniciar(double pos) {
     p->nb[i] = p->tb[i] ? doa_legenda_tempos(1, p->ib[i], p->tb[i], DL_MAXPTS) : 0;
   }
   if (!p->n) {
-    terminar(ger, 0, 1, 0, 0, na && nb ? "no pair of full subtitle tracks (forced only, or line counts too far apart)" : !na ? "the file's subtitles are not in its index"
+    terminar(ger, 0, 1, 0, 0, na && nb ? "no pair of full subtitle tracks (only forced or sign tracks)" : !na ? "the file's subtitles are not in its index"
                                                                          : "the donor's subtitles are not in its index");
     free(p);
     return;

@@ -201,4 +201,13 @@ int audioext_voltou_padrao_consumir(void);
 // is a different cut: the player says once that the sync may drift.
 void audioext_diferenca(int corteSeg, int velocidade);
 int audioext_diferenca_consumir(int *corteSeg, int *velocidade);
+// "SCAN AGAIN" (owner 18/11): the file track the donor is matched against,
+// picked in Audio sync > Scan again and kept per show (the target without its
+// season/episode: "tt123", "kitsu:47192"); lingua "" = Auto (forgets it).
+// The platform passes its data store (dados_ler / dados_gravar_leve).
+void audioext_match_io(char *(*ler)(const char *), int (*gravar)(const char *, const char *));
+void audioext_match_definir(const char *lingua, const char *codec, int canais);
+int  audioext_match_faixa(char *lingua, size_t nl, char *codec, size_t nc, int *canais);   // 1 picked for this show
+int  audioext_serie_chave(const char *alvo, char *o, size_t n);
+const char *audioext_alvo_atual(void);
 #endif

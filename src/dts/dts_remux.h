@@ -65,6 +65,9 @@ typedef int (*DtsRemuxWrite)(void *opaque, const unsigned char *data, int n);
 struct AVPacket; struct AVStream;
 typedef void (*DtsRemuxTap)(void *op, const struct AVPacket *pkt, const struct AVStream *st);
 void dts_remux_set_tap(DtsRemuxTap fn, void *op, int stream);
+/* The same with a second audio stream of the file (owner 18/11: the donor
+ * compared with two of the file's tracks); stream2 -1 = none. */
+void dts_remux_set_tap2(DtsRemuxTap fn, void *op, int stream, int stream2);
 
 int dts_remux_available(void);
 /* Shared packet budget across generators: 192 MiB, 128 MiB on older TVs. */

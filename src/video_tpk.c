@@ -39,6 +39,8 @@
 #include "dts/doador_tpk.h"
 #include "audioext.h"
 #include "doadorleg.h"
+#include "dados.h"
+#include "memlog.h"
 #include "passo.h"
 #include "cdnlink.h"
 #include "debrid.h"
@@ -1489,6 +1491,30 @@ static void extReabrir(void) {
   doadorIniciar(p, "picked in the audio menu");
 }
 static void convDesistir(const char *motivo);
+// WHICH AUDIO THE MATCH COMPARES (owner 18/11, doa_match_definir): the
+// title's original language (TMDB; an anime id without it: Japanese), the
+// file track picked in Audio sync > Scan again for this show, and one file
+// track only on Tizen 4-5.5 or with little memory left (under 200 MB).
+#define DOA_MATCH_LEVE_MB 200
+static void doadorMatchOpcoes(void) {
+  static int ioFeito;
+  char l[16], c[24];
+  int ch = 0, leve = 0;
+  const char *orig = ling_original(), *alvo = audioext_alvo_atual();
+  if (!ioFeito) { ioFeito = 1; audioext_match_io(dados_ler, dados_gravar_leve); }
+  if ((!orig || !orig[0]) && alvo && (!strncmp(alvo, "kitsu:", 6) || !strncmp(alvo, "mal:", 4))) orig = "ja";
+  audioext_match_faixa(l, sizeof l, c, sizeof c, &ch);
+#ifdef NV_TPK40
+  leve = 1;
+#else
+  { long mb = memlog_livre_mb(); leve = mb >= 0 && mb < DOA_MATCH_LEVE_MB; }
+#endif
+  printf("[doador] match settings: original language %s, %s%s%s, %s\n", orig && orig[0] ? orig : "unknown",
+         l[0] ? "match against the file's " : "Auto", l, l[0] ? (c[0] ? " track (picked for this show)" : " track") : "",
+         leve ? "one file track (older TV or low memory)" : "two file tracks allowed");
+  fflush(stdout);
+  doa_match_definir(orig ? orig : "", l, c, ch, leve);
+}
 // Each tick while the donor plays: the menu, "it plays" for the player screen,
 // the donor's failure, and CH+/CH- (applied 700 ms after the last press).
 static void doadorBombear(void) {
@@ -1544,7 +1570,7 @@ static void doadorBombear(void) {
       dv.legEstado = 3;
       printf("[doador] subtitle match not possible (%s): the audio match does it all (~40 s)\n", mt);
       fflush(stdout);
-      if (!doa_dopasuj_ativo()) doa_dopasuj(1);
+      if (!doa_dopasuj_ativo()) { doadorMatchOpcoes(); doa_dopasuj(1); }
     }
   }
   // Second level: the audio refine, once the subtitle offset is in force
@@ -1554,6 +1580,7 @@ static void doadorBombear(void) {
     dv.finoFeito = 1; dv.finoEm = 0;
     printf("[doador] audio refine starts (+-1 s around %+d ms)\n", audioext_offset_ms());
     fflush(stdout);
+    doadorMatchOpcoes();
     doa_dopasuj_fino();
   }
   // The automatic match's outcome, and the follow's corrections (already
@@ -2015,9 +2042,12 @@ static void convBombear(void) {
       doadorSemComecar(m);
       return;
     }
-    if (dv.ativo && !pronto && (int)(agora - (dv.prontoEm ? dv.prontoEm : cv.abriuEm)) > 30000) {
+    // The retry (form 1) waits 15 s, not 30 (owner 18/11, log 2: 60 s of a
+    // black picture before the file's own audio came back).
+    if (dv.ativo && !pronto && (int)(agora - (dv.prontoEm ? dv.prontoEm : cv.abriuEm)) > (dv.variante ? 15000 : 30000)) {
       char m[160];
-      snprintf(m, sizeof m, "the TV player did not prepare in 30 s (%d audio request(s), master form %d)", doa_pedidos_audio(), dv.variante);
+      snprintf(m, sizeof m, "the TV player did not prepare in %d s (%d audio request(s), master form %d)", dv.variante ? 15 : 30,
+               doa_pedidos_audio(), dv.variante);
       doadorSemComecar(m);
       return;
     }
