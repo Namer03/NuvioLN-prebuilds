@@ -357,11 +357,13 @@ void audioext_reconexao_marcar(void) { reconexao = 1; }
 static int seguirAviso, seguirMs;
 void audioext_seguir_evento(int tipo, int ms) {
   if (!urlMarca[0]) return;
-  if (tipo == 2 || tipo == 4) {   // resumed / a small shift corrected: the converter's new offset
+  // resumed / a small shift corrected / the playhead entered another stretch
+  // of the edit map (5, quiet): the converter's new offset
+  if (tipo == 2 || tipo == 4 || tipo == 5) {
     offsetMs = ms > AUDIOEXT_OFFSET_MAX ? AUDIOEXT_OFFSET_MAX : ms < -AUDIOEXT_OFFSET_MAX ? -AUDIOEXT_OFFSET_MAX : ms;
     offsetGeracao++;   // the converter already moved: the live apply finds it equal
   }
-  seguirAviso = tipo; seguirMs = offsetMs;
+  if (tipo != 5) { seguirAviso = tipo; seguirMs = offsetMs; }
 }
 int audioext_seguir_aviso_consumir(int *ms) { int a = seguirAviso; seguirAviso = 0; *ms = seguirMs; return a; }
 int audioext_reconexao_consumir(void) { int r = reconexao; reconexao = 0; return r; }

@@ -38,3 +38,4 @@ void dts_remux_set_audio_offset_ms(int ms) { (void)ms; }
 void doadorleg_iniciar(double pos) { (void)pos; }
 void doadorleg_cancelar(void) {}
 int  doadorleg_resultado(double *k, double *d, double *c, char *m, size_t n) { (void)k; (void)d; (void)c; (void)m; (void)n; return 0; }
+int  doadorleg_mapa_resultado(DoaMapa *o, char *m, size_t n) { (void)o; (void)m; (void)n; return 0; }

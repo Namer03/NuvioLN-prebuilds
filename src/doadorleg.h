@@ -62,6 +62,18 @@ int  doadorleg_frases(const double *t, int n, double gap, double *o);
 int  doadorleg_alinhar_par(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                            double pos, double confMin, int mesmaVel, double razao, int semCorte, double *k, double *desloc,
                            double *conf, char *motivo, size_t mn, int (*cancelar)(void *), void *u);
+/* THE EDIT MAP (owner 18/11; DoaMapa in dts/doador_tpk.h): once per donor,
+ * after the first answer (kIni, dIni: its line), from the same pair. The whole
+ * episode's pieces, else sliding phrase-start windows; each edit narrowed and
+ * switched in the middle of its gap. Returns the stretches (1: the donor is in
+ * one piece, nothing more to do; 0 refused, why in `motivo`: no stretch found,
+ * or more than DOA_MAPA_MAX). Logs its time and every window. */
+int  doadorleg_mapa(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                    int mesmaVel, double confMin, double kIni, double dIni, DoaMapa *out, char *motivo, size_t mn,
+                    int (*cancelar)(void *), void *u);
+/* The map the worker built after the first answer: 0 nothing (yet), 1 a map
+ * (out->n >= 1), -1 none (why in `motivo`). Each outcome once. */
+int  doadorleg_mapa_resultado(DoaMapa *out, char *motivo, size_t n);
 /* The failed pairs' points for the log (doadorleg_pontos_ler reads them back:
  * the host replay, tests/doadorleg.c). */
 void doadorleg_pontos_log(const char *quem, int k, const DoaLegInfo *l, const double *t, int n);

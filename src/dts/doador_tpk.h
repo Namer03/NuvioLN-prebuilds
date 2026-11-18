@@ -134,7 +134,10 @@ int  doa_dopasuj_ativo(void);
 /* FOLLOWING ANOTHER CUT (DoaAbrir.seguir, lengths over 10 s apart): after a
  * find, the same near search every 2 minutes of playback; a shift over
  * 250 ms is applied by itself (4, the new offset in ms), two misses in a row
- * say it is lost (3, once). 0 nothing new. */
+ * say it is lost (3, once). Only for a donor the subtitles could not place
+ * (owner 18/11: with subtitles the edit map does it; doa_aplicar_legendas
+ * turns it off). 5: the playhead entered another stretch of the edit map
+ * (ms its offset; already applied, nothing to say). 0 nothing new. */
 int  doa_seguir_evento(int *ms);
 /* The donor's health, each said once: 1 it stopped answering (three of its
  * segments failed in a row: the app goes back to the file's own audio);
@@ -175,10 +178,35 @@ int  doa_legenda_tempos(int fonte, int k, double *t, int max);
  * (container times). Handed to the app like a match (doa_dopasuj_resultado,
  * como 6, automatico 1): ms and ppm against the session's base. */
 void doa_aplicar_legendas(double k, double desloc, double conf);
-/* The same result as an offset in ms against the session's base, without
- * applying it (a re-match after a seek compares it with the one in force).
- * 0: no donor session ready. */
-int  doa_legendas_ms(double k, double desloc, int *ms);
+/* THE EDIT MAP (owner 18/11, "scan the subs and know where the major
+ * differences are and adjust for them"): where two releases differ (an
+ * extra/missing intro, recap, preview, eyecatch), each stretch of the file
+ * has its own offset. Built once per donor from the subtitles (doadorleg.c),
+ * applied by the donor server per segment: the offset of a segment is the
+ * map's at its start (the file's time), so an edit is a donor seek between
+ * two segments and the TV player never seeks for it. Stretch i covers the
+ * file's [ini, fim) (the first from -inf, the last to +inf); file = k *
+ * donor + desloc there. At most DOA_MAPA_MAX stretches (owner: more is a
+ * wrong title or a broken pair). */
+#define DOA_MAPA_MAX 12
+typedef struct { double ini, fim, desloc; } DoaTrecho;
+typedef struct { int n; double k; DoaTrecho t[DOA_MAPA_MAX]; } DoaMapa;
+/* Installs a map of 2+ stretches for the session's donor (n < 2 clears it:
+ * one offset, as before). `pos`: the playhead. The stretch there takes the
+ * offset in force when a refine or a hand change moved it since the subtitle
+ * answer (the whole map shifts with it). */
+void doa_mapa_definir(const DoaMapa *m, double pos);
+/* The playhead, once a second from the app: the server tells the app when it
+ * enters another stretch (doa_seguir_evento 5: the offset shown is that
+ * stretch's; nothing to apply). */
+void doa_posicao(double pos);
+/* The stretch at `pos`: its index (-1 no map), its span, whether its audio
+ * refine already ran (1 done, -1 tried and not found, 0 not yet). */
+int  doa_mapa_trecho(double pos, double *ini, double *fim, int *refinado);
+/* A stretch's own audio refine (+-1 s around its offset, ~40 s captured while
+ * playing). Its result changes only that stretch's offset in the server (no
+ * seek, no reopen; not handed to the app as a match result). */
+void doa_dopasuj_fino_trecho(int trecho);
 /* SECOND LEVEL: the audio match refining the offset in force (+-1 s, about
  * 40 s of playback, no wide search). como 7. After a subtitle match its
  * candidates are scored audio + subtitles (owner 18/11): within 0.5 s of the

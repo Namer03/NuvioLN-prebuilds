@@ -271,13 +271,14 @@ static struct {
   int legEstado;         // 0 not started, 1 running, 2 applied, 3 not possible
   Uint32 finoEm;         // when the refine starts (0 none pending)
   int finoFeito;
-  // RE-MATCH AFTER A SEEK (owner 18/11, log 13: a release cut another way,
-  // the offset changed by 1-3 s between stretches and a seek back kept the
-  // old one): the subtitle match again at the new place (ms, the points are
-  // in memory). Only a change of DOA_REMATCH_MIN_MS or more is applied: the
-  // subtitles' own precision is ~0.25 s against the audio-refined offset.
-  Uint32 rematchEm;      // when the re-match runs (0 none pending)
-  int rematch;           // the running subtitle match is a re-match
+  // THE EDIT MAP (owner 18/11, replaces the re-match after every seek): the
+  // subtitles scanned once per donor, each stretch where the releases differ
+  // with its own offset, applied by the donor server per segment (no seek,
+  // no reopen). mapaPode: the subtitle answer is in force in the server (the
+  // map is anchored to it); mapaFeito: the map came (or its absence).
+  int mapaPode, mapaFeito, mapaN;
+  Uint32 trechoProx;     // the next look for a stretch to refine
+  int semSeek;           // the offset change pending is an audio refine's: no seek in place (owner 18/11)
   // The offset and speed the player's audio was last asked for with (a seek
   // in place). A change under DOA_SEM_SEEK_MS at the same speed goes into the
   // next segments only (owner 18/11, log 14: applying 5 ms by hand cost a
@@ -1583,28 +1584,31 @@ static void extReabrir(void) {
   doadorIniciar(p, "picked in the audio menu");
 }
 static void convDesistir(const char *motivo);
-#define DOA_REMATCH_SALTO_S 30.0
-#define DOA_REMATCH_ESPERA_MS 3000u
-#define DOA_REMATCH_MIN_MS 500
 #define DOA_SEM_SEEK_MS 40   /* about one AC3 frame; = AUDIOEXT_AUTO_MIN_MS */
 // WHICH AUDIO THE MATCH COMPARES (owner 18/11, doa_match_definir): the
 // title's original language (TMDB; an anime id without it: Japanese), the
 // file track picked in Audio sync > Scan again for this show, and one file
 // track only on Tizen 4-5.5 or with little memory left (under 200 MB).
 #define DOA_MATCH_LEVE_MB 200
+// Tizen 4-5.5, or under DOA_MATCH_LEVE_MB free: the lighter match (one file
+// track) and no refine per stretch of the edit map (owner 18/11: the extra
+// comparison must not load older TVs).
+static int doadorLeve(void) {
+#ifdef NV_TPK40
+  return 1;
+#else
+  long mb = memlog_livre_mb();
+  return mb >= 0 && mb < DOA_MATCH_LEVE_MB;
+#endif
+}
 static void doadorMatchOpcoes(void) {
   static int ioFeito;
   char l[16], c[24];
-  int ch = 0, leve = 0;
+  int ch = 0, leve = doadorLeve();
   const char *orig = ling_original(), *alvo = audioext_alvo_atual();
   if (!ioFeito) { ioFeito = 1; audioext_match_io(dados_ler, dados_gravar_leve); }
   if ((!orig || !orig[0]) && alvo && (!strncmp(alvo, "kitsu:", 6) || !strncmp(alvo, "mal:", 4))) orig = "ja";
   audioext_match_faixa(l, sizeof l, c, sizeof c, &ch);
-#ifdef NV_TPK40
-  leve = 1;
-#else
-  { long mb = memlog_livre_mb(); leve = mb >= 0 && mb < DOA_MATCH_LEVE_MB; }
-#endif
   printf("[doador] match settings: original language %s, %s%s%s, %s\n", orig && orig[0] ? orig : "unknown",
          l[0] ? "match against the file's " : "Auto", l, l[0] ? (c[0] ? " track (picked for this show)" : " track") : "",
          leve ? "one file track (older TV or low memory)" : "two file tracks allowed");
@@ -1639,6 +1643,10 @@ static void doadorBombear(void) {
   // memory, which source holds a connection, the last reconnection.
   { static Uint32 logEm;
     if ((int)(agora - logEm) >= 10000) { logEm = agora; doa_log(); } }
+  // The playhead for the edit map, once a second (the server says when it
+  // enters another stretch: event 5 below).
+  { static Uint32 posEm;
+    if (dv.mapaN >= 2 && pronto && (int)(agora - posEm) >= 1000) { posEm = agora; doa_posicao(video_pos()); } }
   if (cv.jaTocou && !audioext_tocando() && doa_audio() >= DOA_DOADOR(0)) {
     int corte = 0, vel = 0, ppm = 0;
     audioext_tocando_definir(1); audioext_carregando_definir(0);
@@ -1659,22 +1667,7 @@ static void doadorBombear(void) {
     double k = 1, d = 0, conf = 0;
     char mt[160];
     int r = doadorleg_resultado(&k, &d, &conf, mt, sizeof mt);
-    if (r > 0 && dv.rematch) {
-      int ms = 0, agoraMs = audioext_offset_ms();
-      dv.rematch = 0; dv.legEstado = 2;
-      if (doa_legendas_ms(k, d, &ms) && abs(ms - agoraMs) >= DOA_REMATCH_MIN_MS) {
-        printf("[doador] after the seek the subtitles put the donor at %+d ms (%+d ms from the offset in force): another edit here, "
-               "applied; the audio refines it\n", ms, ms - agoraMs);
-        dv.finoFeito = 0; dv.finoEm = 0;
-        doa_aplicar_legendas(k, d, conf);
-      } else
-        printf("[doador] after the seek the subtitles agree with the offset in force (%+d ms, %+d ms in force): kept\n", ms, agoraMs);
-      fflush(stdout);
-    } else if (r < 0 && dv.rematch) {
-      dv.rematch = 0; dv.legEstado = 3;
-      printf("[doador] after the seek no subtitle match (%s): the offset in force (%+d ms) is kept\n", mt, audioext_offset_ms());
-      fflush(stdout);
-    } else if (r > 0) {
+    if (r > 0) {
       dv.legEstado = 2;
       doa_aplicar_legendas(k, d, conf);   // comes back as a match result (como 6): applied below
     } else if (r < 0) {
@@ -1684,15 +1677,21 @@ static void doadorBombear(void) {
       if (!doa_dopasuj_ativo()) { doadorMatchOpcoes(); doa_dopasuj(1); }
     }
   }
-  // The re-match after a seek: once the player plays again and no match runs.
-  if (dv.rematchEm && (int)(agora - dv.rematchEm) >= 0) {
-    if (dv.legEstado == 1 || doa_dopasuj_ativo() || !pronto || !tocando || !audioext_tocando() || doa_audio() < DOA_DOADOR(0))
-      dv.rematchEm = (agora + 1000u) ? agora + 1000u : 1u;
-    else {
-      dv.rematchEm = 0; dv.rematch = 1; dv.legEstado = 1;
-      printf("[doador] seek to %.1f s: the subtitle match again there (offset in force %+d ms)\n", video_pos(), audioext_offset_ms());
+  // THE EDIT MAP (owner 18/11): built on the subtitle worker right after the
+  // answer; handed to the server once that answer is in force there.
+  if (dv.legEstado == 2 && dv.mapaPode && !dv.mapaFeito) {
+    DoaMapa mp;
+    char mt[160];
+    int r = doadorleg_mapa_resultado(&mp, mt, sizeof mt);
+    if (r > 0) {
+      dv.mapaFeito = 1; dv.mapaN = mp.n;
+      if (mp.n >= 2) doa_mapa_definir(&mp, video_pos());
+      else printf("[doador] edit map: one stretch, the donor lines up in one piece: nothing more after this scan\n");
       fflush(stdout);
-      doadorleg_iniciar(video_pos());
+    } else if (r < 0) {
+      dv.mapaFeito = 1;
+      printf("[doador] no edit map (%s): the playhead's offset for the whole file\n", mt);
+      fflush(stdout);
     }
   }
   // Second level: the audio refine, once the subtitle offset is in force
@@ -1718,7 +1717,14 @@ static void doadorBombear(void) {
       printf("[doador] match result %d: offset %d ms speed %d ppm how %d%s hint %d ms heavy %d%s\n", mr, r.ms, r.ppm, r.como,
              r.como == 6 ? " (subtitles)" : r.como == 7 ? " (audio refine)" : "", r.dica_ms, r.pesado, au ? " (by itself)" : "");
       fflush(stdout);
-      audioext_dopasuj_resultado(mr > 0, &a);
+      { unsigned g0 = audioext_offset_geracao();
+        audioext_dopasuj_resultado(mr > 0, &a);
+        // An audio refine's result goes into the next segments only, no seek
+        // in place (owner 18/11).
+        if (mr > 0 && r.como == 7 && audioext_offset_geracao() != g0) dv.semSeek = 1;
+        // The subtitle answer: the edit map may come once it is in force in
+        // the server (now, when it changed nothing).
+        if (mr > 0 && r.como == 6 && audioext_offset_geracao() == g0) dv.mapaPode = 1; }
       // The subtitles placed it: the audio refines from there.
       if (mr > 0 && r.como == 6 && !dv.finoFeito) dv.finoEm = (agora + 3000u) ? agora + 3000u : 1u;
     }
@@ -1731,8 +1737,31 @@ static void doadorBombear(void) {
     }
     if ((ev = doa_seguir_evento(&ms)) != 0) {
       audioext_seguir_evento(ev, ms);
-      if (ev == 4) { dv.gerVista = audioext_offset_geracao(); dv.mudouEm = 0; dv.seekMs = audioext_offset_ms(); }
+      // 4 the follow moved it, 5 the playhead entered another stretch of the
+      // edit map: the server applied it already (no doa_desloc, no seek).
+      if (ev == 4 || ev == 5) { dv.gerVista = audioext_offset_geracao(); dv.mudouEm = 0; dv.seekMs = audioext_offset_ms(); }
     } }
+  // Each stretch's own audio refine, once, the first time playback is in it
+  // with ~45 s of it ahead (the capture is ~40 s), after the first refine.
+  // Not on Tizen 4-5.5 nor under 200 MB free (owner 18/11).
+  // (After the first refine's result is taken and in force: no change pending.)
+  if (dv.mapaN >= 2 && dv.finoFeito && !dv.finoEm && !dv.mudouEm && !dv.semSeek && !doa_dopasuj_ativo() && pronto && tocando &&
+      audioext_tocando() && doa_audio() >= DOA_DOADOR(0) && (int)(agora - dv.trechoProx) >= 0) {
+    double p = video_pos(), ini = 0, fim = 0;
+    int ref = 0, t = doa_mapa_trecho(p, &ini, &fim, &ref);
+    dv.trechoProx = agora + 2000u;
+    if (t >= 0 && ref == 0 && p - ini >= 2.0 && fim - p >= 45.0) {
+      if (doadorLeve()) {
+        static int dito;
+        if (!dito) { dito = 1; printf("[doador] stretch refines skipped: Tizen 4-5.5 or under %d MB free (the first refine's shift only)\n", DOA_MATCH_LEVE_MB); }
+      } else {
+        printf("[doador] stretch %d (%.0f-%.0f s): its own audio refine starts at %.1f s\n", t + 1, ini < 0 ? 0.0 : ini, fim, p);
+        fflush(stdout);
+        doadorMatchOpcoes();
+        doa_dopasuj_fino_trecho(t);
+      }
+    }
+  }
   // Playing the file's own track (the donor's failed, or picked in the TV's
   // menu): not loading any more.
   if (cv.jaTocou && audioext_carregando() && doa_audio() >= 0 && doa_audio() < DOA_DOADOR(0) && doa_estado(NULL, 0) != 0)
@@ -1744,6 +1773,15 @@ static void doadorBombear(void) {
     int ms = audioext_offset_ms();
     dv.mudouEm = 0;
     doa_desloc(ms);
+    if (dv.legEstado == 2 && !dv.mapaPode) dv.mapaPode = 1;   // the subtitle answer is in force: the map may come
+    if (dv.semSeek && audioext_velocidade() == dv.seekPpm) {
+      dv.semSeek = 0;
+      printf("[doador] offset %+d ms (%+d ms, the audio refine's): the next segments carry it, no seek\n", ms, ms - dv.seekMs);
+      dv.seekMs = ms;
+      fflush(stdout);
+      return;
+    }
+    dv.semSeek = 0;
     if (audioext_velocidade() == dv.seekPpm && abs(ms - dv.seekMs) < DOA_SEM_SEEK_MS) {
       printf("[doador] offset %+d ms (%+d ms from the one the player asked with): under %d ms, the next segments carry it, no seek\n",
              ms, ms - dv.seekMs, DOA_SEM_SEEK_MS);
@@ -2280,7 +2318,10 @@ void video_bombear(void) {
       printf("[doador] scan again at %.1f s: subtitles first, then the audio (offset now %+d ms)\n", video_pos(), audioext_offset_ms());
       fflush(stdout);
       doadorleg_cancelar();
-      dv.autoFeito = 1; dv.legEstado = 1; dv.finoFeito = 0; dv.finoEm = 0; dv.rematch = 0; dv.rematchEm = 0;
+      dv.autoFeito = 1; dv.legEstado = 1; dv.finoFeito = 0; dv.finoEm = 0;
+      // The edit map from scratch (owner 18/11), then the refines again.
+      dv.mapaPode = dv.mapaFeito = dv.mapaN = 0;
+      doa_mapa_definir(NULL, 0);
       doadorleg_iniciar(video_pos());
     } else audioext_dopasuj_resultado(0, NULL);
   }
@@ -2465,12 +2506,6 @@ void video_buscar(double s) {
     if (SDL_GetTicks() - envEm < LEG_ACOMODAR_MS * 2) seekNearWrite = 1;
   }
   if (cv.ativo) { cv.seekPend = 1; cv.seekAlvo = s; cv.seekEm = SDL_GetTicks(); }
-  // A jump with a donor playing: the subtitle match again there (dv.rematchEm;
-  // the in-place seeks of an offset change stay where they are).
-  if (dv.ativo && dv.autoFeito && fabs(s - video_pos()) >= DOA_REMATCH_SALTO_S) {
-    Uint32 em = SDL_GetTicks() + DOA_REMATCH_ESPERA_MS;
-    dv.rematchEm = em ? em : 1u;
-  }
   if (cv.ativo && cv.prog) {
     // Progressivo: o fluxo recomeca no quadro-chave antes de `s` (?t=).
     if (dts_tpk_url_em(s, cv.url, sizeof cv.url)) {

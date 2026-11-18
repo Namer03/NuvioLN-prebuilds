@@ -173,8 +173,11 @@ int  doa_pedidos(void) { return 0; }
 int  doa_legendas(int f, DoaLegInfo *o, int m) { (void)f; (void)o; (void)m; return 0; }
 int  doa_legenda_tempos(int f, int k, double *t, int m) { (void)f; (void)k; (void)t; (void)m; return 0; }
 void doa_aplicar_legendas(double k, double d, double c) { (void)k; (void)d; (void)c; }
-int  doa_legendas_ms(double k, double d, int *ms) { (void)k; (void)d; (void)ms; return 0; }
 void doa_dopasuj_fino(void) {}
+void doa_mapa_definir(const DoaMapa *m, double p) { (void)m; (void)p; }
+void doa_posicao(double p) { (void)p; }
+int  doa_mapa_trecho(double p, double *i, double *f, int *r) { (void)p; (void)i; (void)f; (void)r; return -1; }
+void doa_dopasuj_fino_trecho(int t) { (void)t; }
 void doa_match_definir(const char *o, const char *l, const char *c, int n, int v) { (void)o; (void)l; (void)c; (void)n; (void)v; }
 int  doa_faixas_arquivo(DoaRendicao *out, int max) { (void)out; (void)max; return 0; }
 #else
@@ -411,6 +414,19 @@ typedef struct Sessao {
   int difOk, difCorte, difVel, difPpm; // doa_diferenca
   double fpsRazao;                     // the donor's frame rate / the file's (0 unknown)
   double legConf, legDesloc;           // the last subtitle match (confidence 0 none; fo[1].desloc it set)
+  int legMs;                           // its offset (ms): a map installed while it is still in force is taken as it is
+  int legOk;                           // the subtitles placed this donor: no follow (owner 18/11, the edit map does it)
+  // THE EDIT MAP (doa_mapa_definir, owner 18/11): the file's stretches, each
+  // with its own offset (ms against baseDe, as doadorMs). mpm guards it alone
+  // (no other lock is taken inside): the generator reads it per segment, the
+  // app's thread writes it.
+  pthread_mutex_t mpm;
+  int mapaN;                           // 0 none: fo[1].desloc everywhere
+  struct { double ini, fim; int ms, legMs, refinado; } mapa[DOA_MAPA_MAX];
+  int mapaPos;                         // the stretch at the playhead (doa_posicao); -1 unknown
+  double posApp;                       // the playhead, from the app (doa_posicao)
+  int fino1Pend;                       // the first refine's result went to the app: its doa_desloc marks the stretch refined
+  int mTrecho;                         // the running refine is this stretch's own (-1: the app's)
   int ppmPedido;                       // DoaAbrir.doador_ppm
   // automatic match (mm guards the sides while a tap feeds them)
   pthread_mutex_t mm;
@@ -462,6 +478,7 @@ typedef struct Sessao {
   char ultErro[160];
 } Sessao;
 
+static double deslocEm(Sessao *s, double t);
 static pthread_mutex_t trava = PTHREAD_MUTEX_INITIALIZER;
 static int (*casaLingua)(const char *, const char *);
 void doa_definir_casa(int (*casa)(const char *, const char *)) { casaLingua = casa; }
@@ -594,6 +611,7 @@ static void soltar(Sessao *s) {
   free(s->aIni); free(s->video);
   ladoLiberar(&s->mArq); ladoLiberar(&s->mDon); ladoLiberar(&s->mArq2);
   pthread_mutex_destroy(&s->m); pthread_cond_destroy(&s->c); pthread_mutex_destroy(&s->gm); pthread_mutex_destroy(&s->mm);
+  pthread_mutex_destroy(&s->mpm);
   free(s);
 }
 static void falhar(Sessao *s, const char *porque) {
@@ -991,7 +1009,7 @@ static int conferirDoador(Sessao *s) {
 // MP3) play converted, so the segments before its start are not empty.
 static int silencioPossivel(const Sessao *s, const Faixa *f);
 static void silencioPreparar(Sessao *s) {
-  double ini = s->fo[1].v0 * s->fo[1].k + s->fo[1].desloc - s->fo[0].v0;   // the donor's start in the file's time
+  double ini = s->fo[1].v0 * s->fo[1].k + deslocEm(s, s->fo[0].v0) - s->fo[0].v0;   // the donor's start in the file's time
   int i;
   if (ini < 0.12) return;
   for (i = 0; i < s->nfx; i++) {
@@ -1103,6 +1121,7 @@ static void tapArquivo(void *op, const AVPacket *p, const AVStream *st) {
 }
 static void matchIniciar(Sessao *s, int automatico, int seguir);
 static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino);
+static void matchIniciarT(Sessao *s, int automatico, int seguir, int fino, int trecho);
 // The donor's packets the generator reads (its playing track): the match's
 // donor side, and the follow's next look when it is due.
 static void doadorOuvir(Sessao *s, const AVPacket *p, const AVStream *st) {
@@ -1110,12 +1129,47 @@ static void doadorOuvir(Sessao *s, const AVPacket *p, const AVStream *st) {
     pthread_mutex_lock(&s->mm);
     if (s->mArmD) ladoPacote(&s->mDon, p, st);
     pthread_mutex_unlock(&s->mm);
-  } else if (s->segAtivo && !s->mEstado && p->pts != AV_NOPTS_VALUE &&
-             p->pts * av_q2d(st->time_base) * s->fo[1].k + s->fo[1].desloc >= s->segProx)
+  } else if (s->segAtivo && !s->legOk && !s->mapaN && !s->mEstado && p->pts != AV_NOPTS_VALUE &&
+             p->pts * av_q2d(st->time_base) * s->fo[1].k + s->gDesloc >= s->segProx)
     matchIniciar(s, 1, 1);
 }
 static double baseDe(const Sessao *s, double k) { return s->fo[0].v0 - s->fo[1].v0 * k; }
 static int msDe(const Sessao *s, double off, double k) { return (int)lround((off - baseDe(s, k)) * 1000.0); }
+// THE EDIT MAP: the stretch at the file's time t (under mpm).
+static int trechoEm(const Sessao *s, double t) {
+  int i;
+  for (i = 0; i + 1 < s->mapaN && t >= s->mapa[i].fim; i++) {}
+  return i;
+}
+// THE DONOR'S OFFSET AT THE FILE'S TIME t (owner 18/11): its time * k + this
+// = the file's. The edit map's stretch there, else the one offset. Everything
+// that places the donor asks here (the segments, the match's centre, the
+// follow, the opening check).
+static double deslocEm(Sessao *s, double t) {
+  double d;
+  pthread_mutex_lock(&s->mpm);
+  d = s->mapaN > 0 ? baseDe(s, s->fo[1].k) + s->mapa[trechoEm(s, t)].ms / 1000.0 : s->fo[1].desloc;
+  pthread_mutex_unlock(&s->mpm);
+  return d;
+}
+// Where the file has content the donor lacks (a stretch's offset greater than
+// the one before it: the donor would play again what it played just before
+// the edit), the file's time up to which the donor's packets are left out (the
+// segment's silence fills it, owner 18/11). -1 nothing to leave out at t.
+static double silencioAte(Sessao *s, double t, double seg) {
+  double r = -1;
+  pthread_mutex_lock(&s->mpm);
+  if (s->mapaN > 1) {
+    int i = trechoEm(s, t);
+    if (i > 0 && s->mapa[i].ms > s->mapa[i - 1].ms) {
+      // The first segment the stretch's offset is used for starts at E.
+      double e = ceil(s->mapa[i].ini / seg - 1e-9) * seg, ate = e + (s->mapa[i].ms - s->mapa[i - 1].ms) / 1000.0;
+      if (t < ate) r = ate;
+    }
+  }
+  pthread_mutex_unlock(&s->mpm);
+  return r;
+}
 static void deslocAplicar(Sessao *s, int ms) {
   pthread_mutex_lock(&s->gm);
   s->fo[1].desloc = baseDe(s, s->fo[1].k) + ms / 1000.0;
@@ -1191,7 +1245,8 @@ static void matchFim(Sessao *s, int achou, const DoaDopasuj *r) {
 static void *matchFio(void *u) {
   MatchPedido *pd = u;
   Sessao *s = pd->s;
-  int seguir = pd->seguir, fino = pd->fino, siD = pd->siD, i, q, nk, achou = 0, como = 0, ncand = 0;
+  int seguir = pd->seguir, fino = pd->fino, siD = pd->siD, i, q, nk, achou = 0, como = 0, ncand = 0, trecho = s->mTrecho;
+  double legD, tIni = -1e18, tFim = 1e18;
   Lado proprio;
   double t0 = agoraMs(), k0, kf, ks[2], center, off = 0, razao = 1, score = 0, cand[DTS_MATCH_CAND], candSc[DTS_MATCH_CAND];
   DtsMatchSig sm, sd, sm2;
@@ -1232,8 +1287,8 @@ static void *matchFio(void *u) {
   // read on its own over the same stretch, and its offset is the playing one's.
   if (siD >= 0 && !s->cancel && sm.n >= (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ && sd.n < (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ) {
     printf("[doador] match: the donor's reads gave %.1f s of its track %d: reading it on its own\n", sd.n / (double)DTS_MATCH_HZ, siD);
-    const double kk = s->fo[1].k > 0 ? s->fo[1].k : 1.0, raio = fino ? 1.0 : 10.0, c = s->fo[1].desloc;
     const double tm = sm.t0 + sm.n / 2.0 / DTS_MATCH_HZ, pad = DTS_MATCH_WIN_S / 2.0 + 5.0;
+    const double kk = s->fo[1].k > 0 ? s->fo[1].k : 1.0, raio = fino ? 1.0 : 10.0, c = deslocEm(s, tm);
     double lo = (tm - pad - (c + raio)) / kk - 2.0, hi = (tm + pad - (c - raio)) / kk + 2.0, mb;
     int64_t total = s->fo[1].eng ? dts_engine_size(s->fo[1].eng) : 0;
     if (lo < 0) lo = 0;
@@ -1252,7 +1307,17 @@ static void *matchFio(void *u) {
          sm.n / (double)DTS_MATCH_HZ, sm.t0, sd.n / (double)DTS_MATCH_HZ, sd.t0, agoraMs() - t0);
   k0 = s->fo[1].k; kf = s->fpsRazao;
   ks[0] = k0; ks[1] = kf; nk = kf > 0 && fabs(kf - k0) > 0.0005 && !seguir && !fino ? 2 : 1;
-  center = s->fo[1].desloc;
+  // Near the offset in force where the capture was (the edit map's stretch there).
+  center = deslocEm(s, sm.t0 + sm.n / 2.0 / DTS_MATCH_HZ);
+  // A stretch's own refine: the subtitles' share is that stretch's (its offset
+  // from the map, before any shift), and the capture must lie inside it.
+  legD = s->legDesloc;
+  pthread_mutex_lock(&s->mpm);
+  if (trecho >= 0 && trecho < s->mapaN) {
+    legD = baseDe(s, k0) + s->mapa[trecho].legMs / 1000.0;
+    tIni = s->mapa[trecho].ini; tFim = s->mapa[trecho].fim;
+  }
+  pthread_mutex_unlock(&s->mpm);
   if (!s->cancel && sm.n >= (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ && sd.n >= (DTS_MATCH_WIN_S + 10) * DTS_MATCH_HZ) {
     // 1. Near the current offset, from what was played.
     for (q = 0; q < nk; q++) {
@@ -1307,7 +1372,7 @@ static void *matchFio(void *u) {
       int mi = -1;
       double mv = -1, seg = -1;
       for (i = 0; i < ncand; i++) {
-        double dd = fabs(cand[i] - s->legDesloc), sub = s->legConf * 0.5 * (dd <= 0.5 ? 1.0 : exp(-pow((dd - 0.5) / 0.3, 2)));
+        double dd = fabs(cand[i] - legD), sub = s->legConf * 0.5 * (dd <= 0.5 ? 1.0 : exp(-pow((dd - 0.5) / 0.3, 2)));
         double v = candSc[i] + sub;
         printf("[doador] match (subtitles + audio): %+d ms: audio %.2f + subtitles %.2f = %.2f\n", msDe(s, cand[i], k0), candSc[i], sub, v);
         if (v > mv) { seg = mv; mv = v; mi = i; } else if (v > seg) seg = v;
@@ -1407,7 +1472,32 @@ static void *matchFio(void *u) {
   else
   printf("[doador] match%s: %s in %.0f ms%s\n", seguir ? " (follow)" : fino ? " (audio refine)" : "", achou ? "found" : "not found", agoraMs() - t0,
          achou ? "" : res.pesado ? " (a wide search skipped for its download)" : "");
-  if (seguir) {
+  if (fino && trecho >= 0) {
+    // A STRETCH'S OWN REFINE (owner 18/11): only that stretch's offset in the
+    // server changes, for the segments not made yet; no seek, no reopen, not
+    // a match result for the app (event 5 updates the offset it shows when
+    // the playhead is there). A capture outside the stretch (a seek, or it ran
+    // over the edit) says nothing about it: dropped.
+    double c0 = sm.t0, c1 = sm.t0 + sm.n / (double)DTS_MATCH_HZ;
+    int antes = 0, depois = 0, dentro = c0 >= tIni - 0.5 && c1 <= tFim + 0.5;
+    pthread_mutex_lock(&s->mpm);
+    if (trecho < s->mapaN) {
+      antes = s->mapa[trecho].ms;
+      if (achou && dentro && fabs(razao - k0) < 1e-6) {
+        depois = msDe(s, off, razao);
+        s->mapa[trecho].ms = depois; s->mapa[trecho].refinado = 1;
+        if (s->mapaPos == trecho && depois != s->doadorMs) { s->doadorMs = depois; s->segEvento = 5; s->segMs = depois; }
+      } else s->mapa[trecho].refinado = -1;
+    }
+    pthread_mutex_unlock(&s->mpm);
+    if (achou && dentro && fabs(razao - k0) < 1e-6)
+      printf("[doador] stretch %d refined: %+d -> %+d ms (audio score %.2f, captured %.0f-%.0f s)\n", trecho + 1, antes, depois, score, c0, c1);
+    else if (!dentro)
+      printf("[doador] stretch %d (%.0f-%.0f s): the refine's capture (%.0f-%.0f s) is not inside it: dropped, %+d ms kept\n", trecho + 1,
+             tIni, tFim, c0, c1, antes);
+    else printf("[doador] stretch %d: refine not found, %+d ms kept\n", trecho + 1, antes);
+    pthread_mutex_lock(&s->m); s->mEstado = 0; s->mTrecho = -1; pthread_mutex_unlock(&s->m);
+  } else if (seguir) {
     // The follow corrects the offset by itself; the app hears of it.
     pthread_mutex_lock(&s->m);
     if (achou && fabs(razao - k0) < 1e-6) {
@@ -1427,9 +1517,18 @@ static void *matchFio(void *u) {
     s->mEstado = 0;
     pthread_mutex_unlock(&s->m);
   } else {
+    // The first refine with an edit map: its doa_desloc shifts every stretch
+    // and marks the playhead's refined.
+    if (fino && achou) {
+      pthread_mutex_lock(&s->mpm);
+      s->fino1Pend = 1;
+      if (s->mapaN > 0) s->mapa[trechoEm(s, sm.t0 + sm.n / 2.0 / DTS_MATCH_HZ)].refinado = 1;
+      pthread_mutex_unlock(&s->mpm);
+    }
     matchFim(s, achou, &res);
-    // Another cut and "Follow through the whole film": from this find on.
-    if (achou && s->seguir && abs(s->difCorte) > 10) {
+    // Another cut and "Follow through the whole film": from this find on, only
+    // for a donor the subtitles could not place (owner 18/11).
+    if (achou && s->seguir && abs(s->difCorte) > 10 && !s->legOk && !fino) {
       pthread_mutex_lock(&s->m);
       s->segAtivo = 1; s->segFalhas = 0; s->segPerdido = 0;
       s->segProx = sm.t0 + sm.n / (double)DTS_MATCH_HZ + SEGUIR_A_CADA_S;
@@ -1442,20 +1541,32 @@ static void *matchFio(void *u) {
   soltar(s);
   return NULL;
 }
-static void matchIniciar(Sessao *s, int automatico, int seguir) { matchIniciarF(s, automatico, seguir, 0); }
-static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
+static void matchIniciar(Sessao *s, int automatico, int seguir) { matchIniciarT(s, automatico, seguir, 0, -1); }
+static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) { matchIniciarT(s, automatico, seguir, fino, -1); }
+// A failed start: the app hears "not found" (not for the follow, nor for a
+// stretch's own refine, which only marks the stretch tried).
+static void matchNaoComecou(Sessao *s, int seguir, int trecho) {
+  if (trecho >= 0) {
+    pthread_mutex_lock(&s->mpm);
+    if (trecho < s->mapaN && !s->mapa[trecho].refinado) s->mapa[trecho].refinado = -1;
+    pthread_mutex_unlock(&s->mpm);
+  } else if (!seguir) { DoaDopasuj z; memset(&z, 0, sizeof z); matchFim(s, 0, &z); }
+}
+static void matchIniciarT(Sessao *s, int automatico, int seguir, int fino, int trecho) {
   MatchPedido *pd;
   pthread_t t;
   const Faixa *d;
   int siA, siD = -1;
   pthread_mutex_lock(&s->m);
+  // A stretch's own refine waits while a result is not taken by the app yet.
+  if (trecho >= 0 && s->mNovo) { pthread_mutex_unlock(&s->m); return; }
   if (s->mEstado == 1 || s->cancel || !s->pronto || s->audio < 0 || s->fx[s->audio].fonte != 1) {
     int ocupado = s->mEstado == 1;
     pthread_mutex_unlock(&s->m);
-    if (!ocupado && !seguir) { DoaDopasuj z; memset(&z, 0, sizeof z); matchFim(s, 0, &z); }
+    if (!ocupado) matchNaoComecou(s, seguir, trecho);
     return;
   }
-  s->mEstado = 1; s->mAuto = automatico; s->mFino = fino;
+  s->mEstado = 1; s->mAuto = automatico; s->mFino = fino; s->mTrecho = trecho;
   pthread_mutex_unlock(&s->m);
   d = &s->fx[s->audio];
   // WHICH AUDIO (owner 18/11, doa_match_escolher): the original language on
@@ -1490,8 +1601,8 @@ static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
     ladoLiberar(&s->mArq2);
     pthread_mutex_unlock(&s->mm);
     free(pd);
-    pthread_mutex_lock(&s->m); s->mEstado = 0; pthread_mutex_unlock(&s->m);
-    if (!seguir) { DoaDopasuj z; memset(&z, 0, sizeof z); matchFim(s, 0, &z); }
+    pthread_mutex_lock(&s->m); s->mEstado = 0; s->mTrecho = -1; pthread_mutex_unlock(&s->m);
+    matchNaoComecou(s, seguir, trecho);
     return;
   }
   // The donor side always from the generator's reads: the playing track, or
@@ -1506,10 +1617,12 @@ static void matchIniciarF(Sessao *s, int automatico, int seguir, int fino) {
     atomic_fetch_sub(&s->refs, 1); free(pd);
     dts_remux_set_tap(NULL, s, -1);
     pthread_mutex_lock(&s->mm); s->mArmD = 0; pthread_mutex_unlock(&s->mm);
-    pthread_mutex_lock(&s->m); s->mEstado = 0; pthread_mutex_unlock(&s->m);
+    pthread_mutex_lock(&s->m); s->mEstado = 0; s->mTrecho = -1; pthread_mutex_unlock(&s->m);
+    matchNaoComecou(s, seguir, trecho);
     return;
   }
   pthread_detach(t);
+  if (trecho >= 0) printf("[doador] stretch %d: its own audio refine (+-1 s around its offset)\n", trecho + 1);
   printf("[doador] match%s%s: capturing ~%d s of the file's audio %d and the donor's %d while playing%s\n",
          seguir ? " (follow)" : fino ? " (audio refine, +-1 s)" : "", automatico ? " (by itself)" : "", DTS_MATCH_SECONDS, siA,
          siD >= 0 ? siD : d->si, siD >= 0 ? " (from the donor's reads, not the playing track)" : "");
@@ -1738,10 +1851,17 @@ static int posicionar(Sessao *s, int fi, int seg, const double *ini, double len,
                       char *err, size_t en) {
   const Faixa *f = &s->fx[fi];
   Fonte *fo = &s->fo[f->fonte];
+  // The donor's offset for this segment: the edit map's at its start (owner
+  // 18/11: an edit is a donor seek between two segments; the TV player never
+  // seeks for it).
+  double dl = f->fonte ? deslocEm(s, ini[seg] + tl0(s)) : fo->desloc;
   // Segment `seg` in the playing file's time, then in this source's own.
-  double alvo = (ini[seg] + tl0(s) - fo->desloc) / fo->k;
-  int mesmo = s->gOk && s->gFaixa == fi && s->gModo == f->modo && s->gIni == ini && s->gSeg >= 0 && s->gDesloc == fo->desloc;
+  double alvo = (ini[seg] + tl0(s) - dl) / fo->k;
+  int mesmo = s->gOk && s->gFaixa == fi && s->gModo == f->modo && s->gIni == ini && s->gSeg >= 0 && s->gDesloc == dl;
   *saltou = 0; *como = "continued";
+  if (!mesmo && f->fonte && s->gOk && s->gFaixa == fi && s->gModo == f->modo && s->gIni == ini && s->gSeg == seg && s->gDesloc != dl)
+    printf("[doador] seg %d crosses the edit at %.1f s: offset %+.0f -> %+.0f ms (a donor seek, the player plays on)\n", seg, ini[seg],
+           (s->gDesloc - baseDe(s, fo->k)) * 1000.0, (dl - baseDe(s, fo->k)) * 1000.0);
   if (mesmo && s->gSeg == seg) return 0;
   if (mesmo && seg > s->gSeg && ini[seg] - ini[s->gSeg] <= len + 0.5) { *saltou = 1; *como = "read ahead"; return 0; }
   *saltou = 1; *como = fo->conectada ? "seeked" : "seeked, connection taken again";
@@ -1756,7 +1876,7 @@ static int posicionar(Sessao *s, int fi, int seg, const double *ini, double len,
   if (CONVERTE(f->modo)) { if (abrirConversor(s, f, err, en) < 0) { s->gOk = 0; return -1; } }
   else codecLiberar(s);
   dts_engine_interrupt(fo->eng, 0);
-  s->gFonte = f->fonte; s->gDesloc = fo->desloc;
+  s->gFonte = f->fonte; s->gDesloc = dl;
   if (alvo < fo->v0) alvo = fo->v0;   // a donor that starts later than the file: from its own start
   if (seg > 0 || fo->leu || f->fonte) {
     // Straight to the segment: the index gives the keyframe at or before it.
@@ -1969,7 +2089,7 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   int diag = 0, dSem = 0, tMin = 1 << 30, tMax = 0;
   double dMin = 1e9, dMax = 0, ult = -1;
   const char *como = "";
-  double t0 = agoraMs(), tAviso = agoraMs(), fs, fe, pri = -1, tl, ultFim = -1, segFim;
+  double t0 = agoraMs(), tAviso = agoraMs(), fs, fe, pri = -1, tl, ultFim = -1, segFim, silAte;
   if (!par) { snprintf(err, en, "out of memory"); return -1; }
   if (seg < 0) {   // init: the header alone (the converter state is not touched)
     AVStream *as = s->fo[f->fonte].ic->streams[f->si];
@@ -2009,6 +2129,13 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
   avcodec_parameters_free(&par);
   fs = s->aIni[seg] + tl0(s);   // the playing file's time (a donor's packets are mapped onto it)
   fe = seg + 1 < s->naSeg ? s->aIni[seg + 1] + tl0(s) : 1e18;
+  // After an edit where the file has content the donor lacks: the donor's
+  // packets up to `silAte` would repeat what played before it; left out, the
+  // segment's silence takes their place (a copied codec without a silence
+  // encoder keeps them: a repeat is better than a hole).
+  silAte = f->fonte == 1 && silencioPossivel(s, f) ? silencioAte(s, fs, AUD_SEG_S) : -1;
+  if (silAte > fs)
+    printf("[doador] seg %d: the file has %.2f s the donor lacks before %.1f s: silence there, no repeat\n", seg, silAte - fs, silAte);
   diag = (f->id == AV_CODEC_ID_FLAC || f->id == AV_CODEC_ID_OPUS) && !s->dec && s->diagLog < 3;
   s->lidos = s->guardados = 0;
   for (;;) {
@@ -2029,6 +2156,7 @@ static int gerarAudio(Sessao *s, int fi, int seg, Resp *r, char *err, size_t en,
     if (it.t >= fe) break;
     s->fIni = (s->fIni + 1) % FILA_MAX; s->fN--;
     if (saltou && it.t < fs - 0.001) { av_packet_free(&it.p); continue; }
+    if (it.t < silAte) { av_packet_free(&it.p); continue; }
     if (pri < 0) {
       pri = it.t;
       // The source has no audio yet at the segment's start: silence up to its first packet.
@@ -2416,6 +2544,7 @@ int doa_abrir(const DoaAbrir *o, char *out, size_t n) {
   if (!s) return 0;
   atomic_store(&s->refs, 2);   // the API's, the preparation's
   pthread_mutex_init(&s->m, NULL); pthread_cond_init(&s->c, NULL); pthread_mutex_init(&s->gm, NULL); pthread_mutex_init(&s->mm, NULL);
+  pthread_mutex_init(&s->mpm, NULL); s->mapaPos = -1; s->mTrecho = -1;
   s->fo[0].k = s->fo[1].k = 1.0;
   s->ppmPedido = o->doador_ppm; s->seguir = o->seguir;
   if (o->doador_ppm) s->fo[1].k = 1.0 + o->doador_ppm / 1e6;
@@ -2566,6 +2695,26 @@ void doa_desloc(int ms) {
   Sessao *s = pegar();
   if (s && s->pronto && s->nfo > 1 && !s->fo[1].falhou && s->fo[1].ic) {
     double antes;
+    // THE EDIT MAP (owner 18/11): the app's offset is the playhead stretch's.
+    // A change (by hand, Scan again's result, the first audio refine) shifts
+    // every stretch by it; the next segments carry it.
+    pthread_mutex_lock(&s->mpm);
+    if (s->mapaN > 0) {
+      int d = ms - s->doadorMs, i, primeiro = s->fino1Pend;
+      for (i = 0; i < s->mapaN; i++) s->mapa[i].ms += d;
+      if (primeiro && s->mapaPos >= 0 && s->mapaPos < s->mapaN) s->mapa[s->mapaPos].refinado = 1;
+      s->fino1Pend = 0;
+      s->doadorMs = ms;
+      s->fo[1].desloc = s->fo[0].v0 - s->fo[1].v0 * s->fo[1].k + ms / 1000.0;
+      pthread_mutex_unlock(&s->mpm);
+      printf("[doador] map shifted by %+d ms (%s): the playhead's stretch %+d ms, the next segments carry it\n", d,
+             primeiro ? "first refine" : "manual or a match", ms);
+      fflush(stdout);
+      soltar(s);
+      return;
+    }
+    s->fino1Pend = 0;
+    pthread_mutex_unlock(&s->mpm);
     pthread_mutex_lock(&s->gm);
     antes = s->fo[1].desloc;
     s->fo[1].desloc = s->fo[0].v0 - s->fo[1].v0 * s->fo[1].k + ms / 1000.0;
@@ -2752,6 +2901,8 @@ void doa_aplicar_legendas(double k, double desloc, double conf) {
     r.como = 6;
     pthread_mutex_lock(&s->m);
     s->legConf = conf > 0 ? conf : 0.5; s->legDesloc = baseDe(s, k) + r.ms / 1000.0;
+    // The subtitles placed it: the edit map does what the follow did (owner 18/11).
+    s->legMs = r.ms; s->legOk = 1; s->segAtivo = 0;
     if (s->mEstado != 1) {
       s->mRes = r; s->mEstado = 2; s->mNovo = 1; s->mAuto = 1; s->mFino = 0;
       printf("[doador] subtitle match: file = %.6f x donor %+.3f s -> offset %+d ms, speed %+d ppm (was %+d ms)\n", k, desloc, r.ms,
@@ -2762,15 +2913,93 @@ void doa_aplicar_legendas(double k, double desloc, double conf) {
   }
   soltar(s);
 }
-int doa_legendas_ms(double k, double desloc, int *ms) {
+// THE EDIT MAP (owner 18/11; doador_tpk.h).
+void doa_mapa_definir(const DoaMapa *m, double pos) {
   Sessao *s = pegar();
-  int v = 0;
-  if (s && s->pronto && s->nfo > 1 && !s->fo[1].falhou && k > 0.9 && k < 1.1) {
-    if (ms) *ms = msDe(s, desloc, k);
-    v = 1;
+  if (s && s->pronto && s->nfo > 1 && !s->fo[1].falhou) {
+    int i, i0, d = 0, ancora;
+    double k = s->fo[1].k;
+    pthread_mutex_lock(&s->mpm);
+    if (!m || m->n < 2 || m->n > DOA_MAPA_MAX || fabs(m->k - k) > 1e-6) {
+      if (s->mapaN) printf("[doador] edit map cleared: one offset (%+d ms)\n", s->doadorMs);
+      else if (m && m->n >= 2) printf("[doador] edit map not used: its speed %.6f is not the donor's %.6f\n", m->k, k);
+      s->mapaN = 0; s->mapaPos = -1; s->fino1Pend = 0;
+      pthread_mutex_unlock(&s->mpm);
+      fflush(stdout);
+      soltar(s);
+      return;
+    }
+    s->mapaN = m->n;
+    for (i = 0; i < m->n; i++) {
+      s->mapa[i].ini = i ? m->t[i].ini : -1e18; s->mapa[i].fim = i + 1 < m->n ? m->t[i].fim : 1e18;
+      s->mapa[i].ms = s->mapa[i].legMs = msDe(s, m->t[i].desloc, k); s->mapa[i].refinado = 0;
+    }
+    i0 = trechoEm(s, pos);
+    // The offset in force is not the subtitle answer any more (an audio refine
+    // or a change by hand came first): the whole map follows it.
+    ancora = s->legOk && s->doadorMs != s->legMs;
+    if (ancora) {
+      d = s->doadorMs - s->mapa[i0].ms;
+      for (i = 0; i < s->mapaN; i++) s->mapa[i].ms += d;
+      s->mapa[i0].refinado = 1;
+    }
+    s->fino1Pend = 0;
+    s->mapaPos = i0; s->posApp = pos;
+    if (s->mapa[i0].ms != s->doadorMs) { s->doadorMs = s->mapa[i0].ms; s->segEvento = 5; s->segMs = s->doadorMs; }
+    s->fo[1].desloc = baseDe(s, k) + s->doadorMs / 1000.0;
+    s->segAtivo = 0;
+    printf("[doador] edit map in force: %d stretches", s->mapaN);
+    for (i = 0; i < s->mapaN; i++)
+      printf("%s%.0f-%.0f s %+d ms", i ? ", " : ": ", i ? s->mapa[i].ini : 0.0, i + 1 < s->mapaN ? s->mapa[i].fim : s->fo[0].dur, s->mapa[i].ms);
+    printf("; the playhead (%.1f s) in stretch %d\n", pos, i0 + 1);
+    if (ancora) printf("[doador] map shifted by %+d ms (the offset in force, %+d ms, came after the subtitle answer %+d ms)\n", d, s->doadorMs, s->legMs);
+    pthread_mutex_unlock(&s->mpm);
+    fflush(stdout);
+  }
+  soltar(s);
+}
+void doa_posicao(double pos) {
+  Sessao *s = pegar();
+  if (s) {
+    pthread_mutex_lock(&s->mpm);
+    s->posApp = pos;
+    if (s->mapaN > 0) {
+      int i = trechoEm(s, pos);
+      if (i != s->mapaPos) {
+        s->mapaPos = i;
+        printf("[doador] the playhead (%.1f s) is in stretch %d (%.0f-%.0f s): %+d ms%s\n", pos, i + 1, i ? s->mapa[i].ini : 0.0,
+               i + 1 < s->mapaN ? s->mapa[i].fim : s->fo[0].dur, s->mapa[i].ms, s->mapa[i].refinado > 0 ? ", refined" : "");
+        if (s->mapa[i].ms != s->doadorMs) {
+          s->doadorMs = s->mapa[i].ms; s->segEvento = 5; s->segMs = s->doadorMs;
+          s->fo[1].desloc = baseDe(s, s->fo[1].k) + s->doadorMs / 1000.0;
+        }
+        fflush(stdout);
+      }
+    }
+    pthread_mutex_unlock(&s->mpm);
+  }
+  soltar(s);
+}
+int doa_mapa_trecho(double pos, double *ini, double *fim, int *refinado) {
+  Sessao *s = pegar();
+  int v = -1;
+  if (s) {
+    pthread_mutex_lock(&s->mpm);
+    if (s->mapaN > 0) {
+      v = trechoEm(s, pos);
+      if (ini) *ini = v ? s->mapa[v].ini : -1e18;
+      if (fim) *fim = v + 1 < s->mapaN ? s->mapa[v].fim : s->fo[0].dur;
+      if (refinado) *refinado = s->mapa[v].refinado;
+    }
+    pthread_mutex_unlock(&s->mpm);
   }
   soltar(s);
   return v;
+}
+void doa_dopasuj_fino_trecho(int trecho) {
+  Sessao *s = pegar();
+  if (s && trecho >= 0) matchIniciarT(s, 1, 0, 1, trecho);
+  soltar(s);
 }
 int doa_dopasuj_resultado(DoaDopasuj *out, int *automatico) {
   Sessao *s = pegar();

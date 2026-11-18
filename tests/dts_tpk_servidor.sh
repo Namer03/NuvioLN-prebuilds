@@ -66,6 +66,18 @@ ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 -f lavfi -i "aevalsrc='$(ech
   -f lavfi -i "aevalsrc='$(echo "$som" | sed 's/T/(t-1.5)/g')':s=48000" -t 93 \
   -map 0:v -map 1:a -map 2:a -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
   -c:a ac3 -ac 2 -metadata:s:a:0 language=jpn -metadata:s:a:1 language=eng "$work/src/md3.mkv"
+# THE EDIT MAP (owner 18/11). ins.mkv: fx.mkv's 30 s with 2 s only the donor
+# has at 14 s (300 Hz there); beeps at 7.0 and 19.0 s of its own time (= 7.0
+# and 17.0 s of fx.mkv's). cut.mkv: 2 s the donor lacks at fx.mkv's 14-16 s;
+# 500 Hz over its 12-14 s, a beep at 15.0 s of its own (= 17.0 s of fx.mkv's).
+ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 \
+  -f lavfi -i "aevalsrc='if(between(t,7.0,7.2)+between(t,19.0,19.2),sin(2*PI*1000*t),0)+if(between(t,14.0,16.0),0.5*sin(2*PI*300*t),0)':s=48000" -t 32 \
+  -map 0:v -map 1:a -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
+  -c:a eac3 -ac 2 -metadata:s:a:0 language=eng "$work/src/ins.mkv"
+ffmpeg -v error -f lavfi -i testsrc2=s=320x180:r=24 \
+  -f lavfi -i "aevalsrc='if(between(t,15.0,15.2),sin(2*PI*1000*t),0)+if(between(t,12.0,14.0),0.5*sin(2*PI*500*t),0)':s=48000" -t 28 \
+  -map 0:v -map 1:a -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
+  -c:a eac3 -ac 2 -metadata:s:a:0 language=eng "$work/src/cut.mkv"
 ffmpeg -v error -f lavfi -i testsrc2=s=64x64:r=24 -f lavfi -i "sine=f=440:r=48000" -t 150 \
   -filter_complex "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0[a]" -map 0:v -map "[a]" \
   -c:v libx264 -preset ultrafast -g 48 -keyint_min 48 -sc_threshold 0 -pix_fmt yuv420p \
@@ -192,6 +204,49 @@ grep -E '^(ok|FAIL)' "$work/t10.log"
 grep -E '\[doador\] match (tracks|\(two tracks\))' "$work/t10.log" | sed 's/^/     /'
 check "match tracks: original on both sides, the donor's Japanese from the generator's reads" "grep -q 'the original language (ja) on both sides' '$work/t10.log' && grep -q \"from the donor's reads, not the playing track\" '$work/t10.log'"
 check "match tracks: two file tracks scored together" "grep -q 'match (two tracks): ' '$work/t10.log'"
+
+# 9. The edit map (owner 18/11): per segment, no player seek; silence where
+# the donor lacks content; a stretch's own refine changes only its segments.
+mkdir -p "$work/t11"
+"$work/test" "$port" mapa "$work/t11" > "$work/t11.log" 2>&1 || fail=1
+grep -E '^(ok|FAIL)' "$work/t11.log"
+d="$work/t11"
+check "map: stretch 1 unchanged by the map (segments 2 and 3 byte-identical)" "cmp -s '$d/u2.ts' '$d/m2.ts' && cmp -s '$d/u3.ts' '$d/m3.ts'"
+check "map: the beep before the insert at 7.0 s of the file (+10) ($(bipe "$d/m3.ts"))" "perto $(bipe "$d/m3.ts" || echo 0) 17.0 0.05"
+check "map: segment 7 crosses the edit, a donor seek ('crosses the edit' in the log)" "grep -q 'seg 7 crosses the edit at 14.0 s: offset +0 -> -2000 ms' '$work/t11.log'"
+check "map: the beep after the insert at the file's 17.0 s (+10) ($(bipe "$d/m8.ts"))" "perto $(bipe "$d/m8.ts" || echo 0) 27.0 0.05"
+maxv() { ffmpeg -v info -i "$1" -map 0:a:0 -af "${2:+$2,}volumedetect" -f null - 2>&1 | sed -n 's/.*max_volume: \(-*[0-9.inf]*\) dB.*/\1/p' | tail -1; }
+check "map: the insert's 300 Hz tone never plays (segment 7 is silent: $(maxv "$d/m7.ts") dB)" "awk 'BEGIN{exit !($(maxv "$d/m7.ts" | sed 's/^-inf$/-200/') < -50)}'"
+check "map: after a seek back and ahead each segment has its stretch's offset" "cmp -s '$d/m3.ts' '$d/b3.ts' && cmp -s '$d/m8.ts' '$d/b8.ts'"
+check "map: -500 ms by hand shifts stretch 1 too (the beep 0.5 s earlier, $(bipe "$d/h3.ts"))" "perto $(bipe "$d/h3.ts" || echo 0) 16.5 0.05"
+check "map: the cut: segment 7 is silence, no repeat of the 500 Hz before it ($(maxv "$d/c7.ts") dB; segment 6 has it: $(maxv "$d/c6.ts") dB)" \
+  "awk 'BEGIN{exit !($(maxv "$d/c7.ts" | sed 's/^-inf$/-200/') < -50 && $(maxv "$d/c6.ts" | sed 's/^-inf$/-200/') > -20)}' && grep -q 'seg 7: the file has 2.00 s the donor lacks before 16.0 s: silence there, no repeat' '$work/t11.log'"
+check "map: the cut: the beep after it at the file's 17.0 s (+10) ($(bipe "$d/c8.ts"))" "perto $(bipe "$d/c8.ts" || echo 0) 27.0 0.05"
+check "map refine: stretch 1's segment byte-identical before and after" "cmp -s '$d/r5a.ts' '$d/r5b.ts'"
+check "map refine: stretch 2's segment changed" "! cmp -s '$d/r40a.ts' '$d/r40b.ts'"
+check "map refine: the log names the stretch and its change" "grep -qE 'stretch 2 refined: -2600 -> -(29[4-9][0-9]|30[0-5][0-9]) ms' '$work/t11.log'"
+# 10. One piece: a donor without a map gives the same bytes as f4c5f25 (the
+# commit before the map), built from git when its history is here.
+mkdir -p "$work/t12/new" "$work/t12/old"
+"$work/test" "$port" umapeca "$work/t12/new" > "$work/t12.log" 2>&1 || fail=1
+grep -E '^(ok|FAIL)' "$work/t12.log"
+if git cat-file -e f4c5f25:src/dts/doador_tpk.c 2>/dev/null; then
+  # f4c5f25's own sources; this test file (its "umapeca" mode uses only what f4c5f25 had).
+  mkdir -p "$work/old/tests"
+  git archive f4c5f25 src | tar -x -C "$work/old"
+  cp tests/dts_tpk_servidor.c "$work/old/tests/"
+  ${CC:-gcc} -O1 -g -w -DNV_TPK -DNV_DTS_FFMPEG -DDOA_CLIP_S=20 -DSEM_MAPA -I"$ROOT/include" -I"$work/old/src" \
+    "$work/old/tests/dts_tpk_servidor.c" "$work/old/src/dts/dts_hls_tpk.c" "$work/old/src/dts/dts_remux.c" "$work/old/src/dts/doador_tpk.c" \
+    "$work/old/src/dts/dts_engine.c" "$work/old/src/rede.c" "$work/old/src/redeurl.c" \
+    "$ROOT/lib/libavformat.a" "$ROOT/lib/libavcodec.a" "$ROOT/lib/libswresample.a" "$ROOT/lib/libavutil.a" \
+    -lz -lm -lpthread -ldl -o "$work/test-old"
+  "$work/test-old" "$port" umapeca "$work/t12/old" > "$work/t12-old.log" 2>&1 || fail=1
+  iguais=0
+  for i in 0 1 2 3 4 5 6 7 8; do cmp -s "$work/t12/new/p$i.ts" "$work/t12/old/p$i.ts" && iguais=$((iguais + 1)); done
+  check "one piece: segments 0-8 byte-identical to f4c5f25's ($iguais of 9)" "[ $iguais = 9 ]"
+else
+  echo "skip one piece: f4c5f25 is not in this clone's history"
+fi
 
 cp "$work/t1.log" "$work/t3.log" "$work/t4.log" "$work/t5.log" "$work/t6.log" "${DTS_TPK_LOGS:-$work}/" 2>/dev/null || true
 if [ "$fail" != 0 ]; then echo "--- t1.log"; grep '\[dts-tpk\]' "$work/t1.log" | tail -30; echo "--- t3.log"; tail -20 "$work/t3.log"; echo "--- t4.log"; grep -v '^\[dts-tpk\] #' "$work/t4.log" | tail -20; fi

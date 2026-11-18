@@ -35,8 +35,12 @@ static int dialogo(double *t, int max, double fim) {
 }
 
 // REPLAY (owner 18/11): `doadorleg.sh <log>` tries every file x donor pair the
-// log's "[doadorleg] points" lines carry, the way the match did.
-static int replay(const char *arq) {
+// log's "[doadorleg] points" lines carry, the way the match did, then builds
+// the edit map from the pair that answered. `mapa` (when not NULL) gets the
+// last pair's map (the fixture's test below).
+static int replayMapa(const char *arq, DoaMapa *mapa);
+static int replay(const char *arq) { return replayMapa(arq, NULL); }
+static int replayMapa(const char *arq, DoaMapa *mapa) {
   static double tf[8][DL_MAXPTS_T], td[8][DL_MAXPTS_T];
   int nf[8] = {0}, nd[8] = {0}, kf[8], kd[8], af[8], ad[8], cf = 0, cd = 0, mesma = 0, semCorte = 0, i, j;
   char linha[16384], cod[8][16];
@@ -73,6 +77,13 @@ static int replay(const char *arq) {
       int ok = doadorleg_alinhar_par(tf[i], nf[i], af[i], "eng", td[j], nd[j], ad[j], "eng", pos, r < 0.5 ? 0.90 : 0.0, mesma, r, semCorte,
                                      &k, &d, &c, m, sizeof m, nunca, NULL);
       printf("replay: file %d x donor %d: %s (k %.6f desloc %+.3f conf %.2f) %s\n", kf[i], kd[j], ok ? "FOUND" : "not found", k, d, c, ok ? "" : m);
+      if (ok) {
+        DoaMapa mp;
+        int n = doadorleg_mapa(tf[i], nf[i], af[i], "eng", td[j], nd[j], ad[j], "eng", mesma, r < 0.5 ? 0.90 : 0.0, k, d, &mp, m, sizeof m,
+                               nunca, NULL);
+        printf("replay: edit map: %d stretch(es)%s%s\n", n, n ? "" : ": ", n ? "" : m);
+        if (mapa) *mapa = mp;
+      }
     }
   return 0;
 }
@@ -273,6 +284,119 @@ int main(int argc, char **argv) {
     printf("another edit with several cuts, from the playhead on: %d of 12 found, %d wrong\n", achados, errados);
     // 8/12 with the forward window; 0/12 without it (the +-5 min pass alone).
     assert(achados >= 7 && errados == 0); }
+  // 4j. THE EDIT MAP (owner 18/11) on the same edit: 7.0 / 8.9 / 7.9 / 9.6 s
+  // ahead by stretch, edits at 180, 700 and 1010 s of the file. Every
+  // stretch's offset within 0.3 s, every switch inside its gap (between the
+  // last line before the edit and the first after), no stretch more.
+  { static double fa[8000], dn[8000], fala[2000];
+    static int tem[2000];   // the donor has this line too
+    const double corte[3] = { 180.0, 700.0, 1010.0 }, adi[4] = { 7.0, 8.9, 7.9, 9.6 };
+    int nfa, ndn, nl, sd, certos = 0;
+    for (sd = 1; sd <= 12; sd++) {
+      double x = 3.0;
+      DoaMapa mp;
+      int n, ok = 1, e;
+      nfa = ndn = nl = 0;
+      semente = (unsigned)sd * 104729u;
+      while (x < 1420.0 && nl < 2000) { fala[nl++] = x; x += aleat() < 0.05 ? 8.0 + aleat() * 20.0 : 1.2 + aleat() * 3.5; }
+      for (i = 0; i < nl; i++) {
+        for (int l = 0; l < 3; l++) fa[nfa++] = fala[i] + l * 0.01 + aleat() * 0.04;
+        if (aleat() < 0.3) fa[nfa++] = fala[i] + 1.0 + aleat();
+      }
+      for (i = 0; i < nl; i++) {
+        double t = fala[i], adiante = t < corte[0] ? adi[0] : t < corte[1] ? adi[1] : t < corte[2] ? adi[2] : adi[3];
+        tem[i] = aleat() >= 0.2;
+        if (!tem[i]) continue;
+        dn[ndn++] = t + adiante + (aleat() - 0.5) * 0.4;
+      }
+      qsort(fa, (size_t)nfa, sizeof *fa, cmpd); qsort(dn, (size_t)ndn, sizeof *dn, cmpd);
+      // The first answer at the playhead (1086.5 s): -9.6.
+      n = doadorleg_mapa(fa, nfa, 1, "eng", dn, ndn, 0, "eng", 1, 0.0, 1.0, -9.6, &mp, m, sizeof m, nunca, NULL);
+      if (n != 4) ok = 0;
+      for (e = 0; ok && e < 4; e++) if (fabs(mp.t[e].desloc + adi[e]) > 0.3) ok = 0;
+      // The gap: from the last line before the edit that both releases have
+      // to the first after it that both have (a line only one has says
+      // nothing about where the edit is).
+      for (e = 0; ok && e < 3; e++) {
+        double antes = -1, depois = -1;
+        for (i = 0; i < nl; i++) { if (fala[i] < corte[e]) { if (tem[i]) antes = fala[i]; } else if (tem[i]) { depois = fala[i]; break; } }
+        if (mp.t[e].fim < antes - 0.5 || mp.t[e].fim > depois + 0.5) ok = 0;
+      }
+      printf("edit map, several cuts, seed %d: %d stretch(es)%s", sd, n, ok ? ", right" : ", WRONG");
+      for (e = 0; e < n; e++) printf(" | %+.2f to %.1f", mp.t[e].desloc, mp.t[e].fim);
+      for (e = 0; e < 3; e++) {
+        double antes = -1, depois = -1;
+        for (i = 0; i < nl; i++) { if (fala[i] < corte[e]) { if (tem[i]) antes = fala[i]; } else if (tem[i]) { depois = fala[i]; break; } }
+        printf(" [gap %.1f-%.1f]", antes, depois);
+      }
+      printf("\n");
+      certos += ok;
+    }
+    printf("edit map, several cuts: %d of 12 right\n", certos);
+    assert(certos >= 11); }
+  // 4k. The edit map: a donor in one piece gives one stretch; unrelated
+  // tracks are refused; a pair with 13+ stretches is refused.
+  { static double fa[16000], dn[16000], fala[4000];
+    int nfa = 0, ndn = 0, nl = 0, n;
+    DoaMapa mp;
+    double x = 3.0;
+    semente = 99991;
+    while (x < 1420.0 && nl < 4000) { fala[nl++] = x; x += aleat() < 0.05 ? 8.0 + aleat() * 20.0 : 1.2 + aleat() * 3.5; }
+    for (i = 0; i < nl; i++) { fa[nfa++] = fala[i] + aleat() * 0.04; if (aleat() > 0.15) dn[ndn++] = fala[i] + 2.1 + (aleat() - 0.5) * 0.3; }
+    qsort(fa, (size_t)nfa, sizeof *fa, cmpd); qsort(dn, (size_t)ndn, sizeof *dn, cmpd);
+    n = doadorleg_mapa(fa, nfa, 0, "eng", dn, ndn, 0, "eng", 1, 0.0, 1.0, -2.1, &mp, m, sizeof m, nunca, NULL);
+    printf("edit map, one piece: %d stretch(es), %+.3f\n", n, n ? mp.t[0].desloc : 0.0);
+    assert(n == 1 && fabs(mp.t[0].desloc + 2.1) < 0.2);
+    semente = 777;
+    ndn = dialogo(dn, 4000, 1400.0);
+    n = doadorleg_mapa(fa, nfa, 0, "eng", dn, ndn, 0, "eng", 1, 0.0, 1.0, -2.1, &mp, m, sizeof m, nunca, NULL);
+    printf("edit map, unrelated: %d stretch(es) (%s)\n", n, m);
+    assert(n == 0);
+    // A 2 h film whose donor alternates 2.0 / 4.5 s ahead every 400 s: 18 stretches.
+    nfa = ndn = nl = 0; x = 3.0;
+    semente = 31337;
+    while (x < 7190.0 && nl < 4000) { fala[nl++] = x; x += aleat() < 0.05 ? 8.0 + aleat() * 20.0 : 1.2 + aleat() * 3.5; }
+    for (i = 0; i < nl; i++) {
+      fa[nfa++] = fala[i] + aleat() * 0.04;
+      if (aleat() > 0.15) dn[ndn++] = fala[i] + ((int)(fala[i] / 400.0) % 2 ? 4.5 : 2.0) + (aleat() - 0.5) * 0.3;
+    }
+    qsort(fa, (size_t)nfa, sizeof *fa, cmpd); qsort(dn, (size_t)ndn, sizeof *dn, cmpd);
+    n = doadorleg_mapa(fa, nfa, 0, "eng", dn, ndn, 0, "eng", 1, 0.0, 1.0, -2.0, &mp, m, sizeof m, nunca, NULL);
+    printf("edit map, 18 stretches: %d (%s)\n", n, m);
+    assert(n == 0 && strstr(m, "more than 12")); }
+  // 4l. The edit map from the whole-episode match (EMBER in log 13: ACCEPTED
+  // with 2 pieces): clean tracks (lines 3-7 s apart, as the engine's own
+  // test), the donor 4 s behind until 600 s, then 2 s ahead (a 6 s scene only
+  // the donor has; its lines there left out).
+  { static double fa[8000], dn[8000], fala[2000];
+    int nfa = 0, ndn = 0, nl = 0, n;
+    DoaMapa mp;
+    double x = 3.0, antes = -1, depois = -1;
+    semente = 4711;
+    while (x < 1420.0 && nl < 2000) { fala[nl++] = x; x += 3.0 + aleat() * 4.0; }
+    for (i = 0; i < nl; i++) {
+      fa[nfa++] = fala[i];
+      if (fala[i] > 600.0 && fala[i] < 606.5) continue;
+      dn[ndn++] = fala[i] + (fala[i] < 600.0 ? -4.0 : 2.0);
+      if (fala[i] < 600.0) antes = fala[i]; else if (depois < 0) depois = fala[i];
+    }
+    qsort(fa, (size_t)nfa, sizeof *fa, cmpd); qsort(dn, (size_t)ndn, sizeof *dn, cmpd);
+    n = doadorleg_mapa(fa, nfa, 0, "eng", dn, ndn, 0, "eng", 1, 0.0, 1.0, -2.0, &mp, m, sizeof m, nunca, NULL);
+    printf("edit map, whole episode in 2 pieces: %d stretch(es), %s\n", n, m);
+    assert(n == 2 && fabs(mp.t[0].desloc - 4.0) < 0.2 && fabs(mp.t[1].desloc + 2.0) < 0.2);
+    assert(mp.t[0].fim >= antes - 0.5 && mp.t[0].fim <= depois + 0.5); }
+  // 4m. Owner's log 13 (tests/data/doadorleg-log13.txt, Emmid against the
+  // BD remux): ~4 stretches, -7.0 / -8.9 / -7.9 / -9.85.
+  if (access("tests/data/doadorleg-log13.txt", R_OK) == 0) {
+    DoaMapa mp;
+    const double esp[4] = { -7.0, -8.9, -7.9, -9.85 }, gap[3][2] = { { 175.0, 281.0 }, { 689.0, 695.0 }, { 1003.0, 1015.0 } };
+    memset(&mp, 0, sizeof mp);
+    replayMapa("tests/data/doadorleg-log13.txt", &mp);
+    assert(mp.n == 4);
+    for (i = 0; i < 4; i++) assert(fabs(mp.t[i].desloc - esp[i]) < 0.2);
+    for (i = 0; i < 3; i++) assert(mp.t[i].fim > gap[i][0] && mp.t[i].fim < gap[i][1]);
+    printf("edit map, log 13: 4 stretches, as replayed by hand\n");
+  } else printf("edit map, log 13: fixture not found (run from the repo root), skipped\n");
   // 4i. The points in the log and back (the host replay).
   { double t[5] = { 3.21, 3.25, 7.0, 1423.99, 1424.0 }, r[8];
     char linha[512], q[16];
