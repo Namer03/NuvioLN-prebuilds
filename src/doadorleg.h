@@ -56,8 +56,14 @@ int  doadorleg_alinhar_v(const double *ta, int na, int assA, const char *la, con
  * 18/11: a fansub's ASS against CR's). Returns the count written to o. */
 int  doadorleg_frases(const double *t, int n, double gap, double *o);
 /* One pair as the match tries it: the plain match, then (an ASS side, or line
- * counts under 0.8 of each other) the phrase starts with confidence 0.90. */
+ * counts under 0.8 of each other) the phrase starts with confidence 0.90:
+ * first in a window of +-5 min of the file around the playhead (`pos`), then,
+ * only when semCorte (the files are as long), over the whole episode. */
 int  doadorleg_alinhar_par(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
-                           double pos, double confMin, int mesmaVel, double razao, double *k, double *desloc, double *conf,
-                           char *motivo, size_t mn, int (*cancelar)(void *), void *u);
+                           double pos, double confMin, int mesmaVel, double razao, int semCorte, double *k, double *desloc,
+                           double *conf, char *motivo, size_t mn, int (*cancelar)(void *), void *u);
+/* The failed pairs' points for the log (doadorleg_pontos_ler reads them back:
+ * the host replay, tests/doadorleg.c). */
+void doadorleg_pontos_log(const char *quem, int k, const DoaLegInfo *l, const double *t, int n);
+int  doadorleg_pontos_ler(const char *linha, char *quem, size_t nq, int *k, int *parte, double *t, int max, int *n);
 #endif

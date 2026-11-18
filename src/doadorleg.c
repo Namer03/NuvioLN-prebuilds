@@ -129,7 +129,7 @@ int doadorleg_reta_v(double t1, double d1, double t2, double d2, int mesmaVel, d
 // A track's start times as a timing-only document: each line runs to the next
 // start (at most DL_FIM_MAX). ASS: a burst (karaoke, a typeset sign drawn in
 // pieces) keeps its first point only.
-static LegendaDocumento *documento(const double *t, int n, int ass, const char *lingua, const char *quem, double *span) {
+static LegendaDocumento *documento(const double *t, int n, int ass, const char *lingua, const char *quem, double *span, double j0, double j1) {
   LegendaCue *v = calloc((size_t)n, sizeof *v);
   LegendaDocumentoInfo info;
   LegendaDocumento *d;
@@ -150,6 +150,9 @@ static LegendaDocumento *documento(const double *t, int n, int ass, const char *
   snprintf(info.origem, sizeof info.origem, "%s index", quem);
   snprintf(info.identidade, sizeof info.identidade, "doador:%s:%d", quem, m);
   info.flags = LEGENDA_DOC_COMPLETO | LEGENDA_DOC_FIM_ESTIMADO;
+  // A window (the file's side only): the engine proves the offset inside it
+  // (a cut elsewhere does not matter), speed 1, +-10 s.
+  if (j1 > j0) { info.flags |= LEGENDA_DOC_JANELA; info.janelaInicio = j0; info.janelaFim = j1; }
   if (span) { span[0] = m ? v[0].inicio : 0; span[1] = m ? v[m - 1].inicio : 0; }
   d = m >= 20 ? legenda_documento_de_cues(v, m, &info) : NULL;
   free(v);
@@ -162,6 +165,7 @@ typedef struct {
   double *ta[DL_PARES], *tb[DL_PARES]; int na[DL_PARES], nb[DL_PARES];
   double pos;
   int mesmaVel;          // both containers at one frame rate (doa_diferenca): speed 1
+  int semCorte;          // the two files are as long (doa_diferenca's cut within 1 s): the whole-episode phrase pass may run
   unsigned ger;
 } Pedido;
 
@@ -183,23 +187,23 @@ static void terminar(unsigned ger, int achou, double k, double d, double conf, c
 }
 
 static int alinharMin(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
-                      double pos, double confMin, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
+                      double pos, double confMin, double j0, double j1, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
                       int (*cancelar)(void *), void *u);
 int doadorleg_alinhar(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                       double pos, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
-  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, 0, k, desloc, NULL, motivo, mn, cancelar, u);
+  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, 0, 0, 0, k, desloc, NULL, motivo, mn, cancelar, u);
 }
 int doadorleg_alinhar_v(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                         double pos, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
                         int (*cancelar)(void *), void *u) {
-  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, mesmaVel, k, desloc, conf, motivo, mn, cancelar, u);
+  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, 0, 0, mesmaVel, k, desloc, conf, motivo, mn, cancelar, u);
 }
 static int alinharMin(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
-                      double pos, double confMin, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
+                      double pos, double confMin, double j0, double j1, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
                       int (*cancelar)(void *), void *u) {
   double sa[2], sb[2];
-  LegendaDocumento *ref = documento(ta, na, assA, la, "file", sa);
-  LegendaDocumento *doc = documento(tb, nb, assB, lb, "donor", sb);
+  LegendaDocumento *ref = documento(ta, na, assA, la, "file", sa, j0, j1);
+  LegendaDocumento *doc = documento(tb, nb, assB, lb, "donor", sb, 0, 0);
   AutoSyncConfig cfg = autosync_config(AUTOSYNC_THOROUGH);
   AutoSyncMapa *mapa = NULL;
   AutoSyncResultado r;
@@ -246,10 +250,18 @@ static int alinharMin(const double *ta, int na, int assA, const char *la, const 
 // two tracks were written apart (one splits a line in two, carries typeset
 // signs or karaoke, the other joins lines), their starts disagree too often
 // for the engine. What both still share is where a phrase starts after a
-// pause: both tracks keep only starts DL_FRASE_S after the one kept before.
-// Tried after the plain match fails, with confidence 0.90 needed (synthetic
-// fansub/CR timelines: 59 of 60 found, none wrong, at 2.5 s).
-#define DL_FRASE_S 2.5
+// pause: both tracks keep only starts DL_FRASE_S after the one kept before,
+// and 0.90 confidence is needed.
+// AROUND THE PLAYHEAD FIRST (owner 18/11, log 6: a CR release against a
+// fansub refused as "region_disagreement", and the whole-episode phrase pass
+// gave a wrong +4774 ms in two pieces that the 0.90 bar only just stopped):
+// the file's side is a window of +-DL_JANELA_S around the playhead, so a cut
+// elsewhere in the episode does not matter (the offset is needed where the
+// viewer is; another cut is the follow's). Synthetic fansub/CR timelines with
+// a cut: found 65-90 %, never wrong; the whole-episode pass was wrong in 3 of
+// ~300 runs with a cut. It runs only when the lengths agree (semCorte).
+#define DL_FRASE_S  2.5
+#define DL_JANELA_S 300.0
 int doadorleg_frases(const double *t, int n, double gap, double *o) {
   int i, m = 0;
   double u = -1e18;
@@ -260,22 +272,92 @@ int doadorleg_frases(const double *t, int n, double gap, double *o) {
   return m;
 }
 int doadorleg_alinhar_par(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
-                          double pos, double confMin, int mesmaVel, double razao, double *k, double *desloc, double *conf,
-                          char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
-  double *fa, *fb;
-  int achou = alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, confMin, mesmaVel, k, desloc, conf, motivo, mn, cancelar, u), ma, mb;
+                          double pos, double confMin, int mesmaVel, double razao, int semCorte, double *k, double *desloc,
+                          double *conf, char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
+  double *fa, *fb, cm = confMin > DL_CONF_CRUZADO ? confMin : DL_CONF_CRUZADO;
+  int achou = alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, confMin, 0, 0, mesmaVel, k, desloc, conf, motivo, mn, cancelar, u), ma, mb;
   if (achou || (cancelar && cancelar(u)) || !(assA || assB || razao < 0.8)) return achou;
   fa = malloc(sizeof *fa * (size_t)(na > 0 ? na : 1)); fb = malloc(sizeof *fb * (size_t)(nb > 0 ? nb : 1));
   if (fa && fb) {
-    char m2[120] = "";
+    char m1[64], m2[64] = "", m3[64] = "";
+    double j0, j1, ini = na ? ta[0] : 0, fim = na ? ta[na - 1] : 0;
+    snprintf(m1, sizeof m1, "%s", motivo);
     ma = doadorleg_frases(ta, na, DL_FRASE_S, fa); mb = doadorleg_frases(tb, nb, DL_FRASE_S, fb);
-    printf("[doadorleg] phrase starts only (%.1f s apart): file %d / donor %d, confidence 0.90 needed\n", DL_FRASE_S, ma, mb);
-    achou = alinharMin(fa, ma, 0, la, fb, mb, 0, lb, pos, confMin > DL_CONF_CRUZADO ? confMin : DL_CONF_CRUZADO, mesmaVel, k, desloc,
-                       conf, m2, sizeof m2, cancelar, u);
-    if (!achou) { char m1[64]; snprintf(m1, sizeof m1, "%s", motivo); snprintf(motivo, mn, "%.50s; phrase starts: %.50s", m1, m2); }
+    // The window: +-DL_JANELA_S around the playhead, inside the track, 2*DL_JANELA_S wide when it fits.
+    j0 = pos - DL_JANELA_S; j1 = pos + DL_JANELA_S;
+    if (j0 < ini) { j1 += ini - j0; j0 = ini; }
+    if (j1 > fim) { j0 -= j1 - fim; j1 = fim; }
+    if (j0 < ini) j0 = ini;
+    printf("[doadorleg] phrase starts only (%.1f s apart) around the playhead (%.0f-%.0f s of the file): file %d / donor %d, confidence 0.90 needed\n",
+           DL_FRASE_S, j0, j1, ma, mb);
+    achou = j1 - j0 >= 120.0 &&
+            alinharMin(fa, ma, 0, la, fb, mb, 0, lb, pos, cm, j0, j1, mesmaVel, k, desloc, conf, m2, sizeof m2, cancelar, u);
+    if (!achou && j1 - j0 < 120.0) snprintf(m2, sizeof m2, "the track is too short for a window");
+    if (!achou && !(cancelar && cancelar(u))) {
+      if (semCorte) {
+        printf("[doadorleg] phrase starts over the whole episode (the two files are as long): confidence 0.90 needed\n");
+        achou = alinharMin(fa, ma, 0, la, fb, mb, 0, lb, pos, cm, 0, 0, mesmaVel, k, desloc, conf, m3, sizeof m3, cancelar, u);
+      } else snprintf(m3, sizeof m3, "not tried (the lengths differ: another cut)");
+    }
+    if (!achou) snprintf(motivo, mn, "%.40s; around the playhead: %.40s; whole: %.40s", m1, m2, m3);
   }
   free(fa); free(fb);
   return achou;
+}
+
+// THE POINTS OF A FAILED PAIR (owner 18/11): both tracks' index starts in the
+// log, so a real pair can be replayed on the host (tests/doadorleg.c reads
+// them back). Centiseconds, the first absolute, then deltas, base 36, "."
+// between; DL_PONTOS_LINHA values a line.
+#define DL_PONTOS_LINHA 240
+void doadorleg_pontos_log(const char *quem, int k, const DoaLegInfo *l, const double *t, int n) {
+  static const char dig[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  int partes = (n + DL_PONTOS_LINHA - 1) / DL_PONTOS_LINHA, pt, i;
+  long ant = 0;
+  printf("[doadorleg] points %s %d: %s %s \"%.30s\" n=%d\n", quem, k, l && l->lingua[0] ? l->lingua : "und", l ? l->codec : "?",
+         l ? l->nome : "", n);
+  for (pt = 0; pt < partes; pt++) {
+    char b[DL_PONTOS_LINHA * 8 + 1];
+    size_t o = 0;
+    for (i = pt * DL_PONTOS_LINHA; i < n && i < (pt + 1) * DL_PONTOS_LINHA; i++) {
+      long c = lround(t[i] * 100.0), d = c - ant;
+      char tmp[16];
+      int m = 0;
+      ant = c;
+      if (d < 0) { b[o++] = '-'; d = -d; }
+      do { tmp[m++] = dig[d % 36]; d /= 36; } while (d && m < 15);
+      while (m) b[o++] = tmp[--m];
+      b[o++] = '.';
+    }
+    if (o) o--;
+    b[o] = 0;
+    printf("[doadorleg] points %s %d part %d/%d: %s\n", quem, k, pt + 1, partes, b);
+  }
+  fflush(stdout);
+}
+// One "points ... part" line back: 1 read (*n points added after the *n already in t).
+int doadorleg_pontos_ler(const char *linha, char *quem, size_t nq, int *k, int *parte, double *t, int max, int *n) {
+  const char *p = strstr(linha, "[doadorleg] points ");
+  char q[16];
+  int kk, pp, tot, usado = 0;
+  long c = 0;
+  if (!p || sscanf(p, "[doadorleg] points %15s %d part %d/%d: %n", q, &kk, &pp, &tot, &usado) < 4 || !usado) return 0;
+  p += usado;
+  if (pp == 1) *n = 0;
+  else if (*n > 0) c = lround(t[*n - 1] * 100.0);
+  while (*p && *p != '\n' && *n < max) {
+    long d = 0;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; }
+    while (*p && *p != '.' && *p != '\n') { d = d * 36 + (*p <= '9' ? *p - '0' : *p - 'a' + 10); p++; }
+    c += neg ? -d : d;
+    t[(*n)++] = c / 100.0;
+    if (*p == '.') p++;
+  }
+  if (quem && nq) snprintf(quem, nq, "%s", q);
+  if (k) *k = kk;
+  if (parte) *parte = pp;
+  return 1;
 }
 
 static void *fio(void *u) {
@@ -292,8 +374,20 @@ static void *fio(void *u) {
            b->lingua[0] ? b->lingua : "und", b->codec, b->nome, b->falas,
            cm > 0 && !p->cruzado[i] ? " (line counts over 2x apart: confidence 0.90 needed)" : "");
     achou = doadorleg_alinhar_par(p->ta[i], p->na[i], ehAss(a), a->lingua, p->tb[i], p->nb[i], ehAss(b), b->lingua, p->pos,
-                                  cm, p->mesmaVel, doadorleg_razao(a, b), &k, &d, &conf, m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
+                                  cm, p->mesmaVel, doadorleg_razao(a, b), p->semCorte, &k, &d, &conf, m, sizeof m, cancelado,
+                                  (void *)(uintptr_t)p->ger);
     if (!achou) snprintf(motivo, sizeof motivo, "pair %d (%s %s / %s %s): %s", i + 1, a->lingua, a->codec, b->lingua, b->codec, m);
+  }
+  if (!achou && !cancelado((void *)(uintptr_t)p->ger)) {
+    // For the host replay: where the viewer was, the lengths, every pair's tracks once.
+    int j, q, ja;
+    printf("[doadorleg] points: at %.1f s, same frame rate %d, as long %d, %d pair(s)\n", p->pos, p->mesmaVel, p->semCorte, p->n);
+    for (j = 0; j < p->n; j++) {
+      for (q = 0, ja = 0; q < j; q++) if (p->ia[q] == p->ia[j]) ja = 1;
+      if (!ja) doadorleg_pontos_log("file", p->ia[j], &p->a[p->ia[j]], p->ta[j], p->na[j]);
+      for (q = 0, ja = 0; q < j; q++) if (p->ib[q] == p->ib[j]) ja = 1;
+      if (!ja) doadorleg_pontos_log("donor", p->ib[j], &p->b[p->ib[j]], p->tb[j], p->nb[j]);
+    }
   }
   terminar(p->ger, achou, k, d, conf, achou ? "" : motivo);
   for (i = 0; i < p->n; i++) { free(p->ta[i]); free(p->tb[i]); }
@@ -310,7 +404,8 @@ void doadorleg_iniciar(double pos) {
   if (!p) { terminar(ger, 0, 1, 0, 0, "out of memory"); return; }
   p->ger = ger; p->pos = pos;
   { int corte = 0, vel = 1, ppm = 0;
-    p->mesmaVel = doa_diferenca(&corte, &vel, &ppm) && !vel; }
+    int ok = doa_diferenca(&corte, &vel, &ppm);
+    p->mesmaVel = ok && !vel; p->semCorte = ok && abs(corte) <= 1; }
   na = doa_legendas(0, p->a, DOA_LEG_MAX);
   nb = doa_legendas(1, p->b, DOA_LEG_MAX);
   // Shared-language pairs first (English first), then pairs in two

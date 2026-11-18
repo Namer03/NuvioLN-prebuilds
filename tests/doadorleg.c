@@ -4,12 +4,14 @@
 // sync's (autosync.c).
 #include "../src/doadorleg.h"
 #include "../src/mkvfix.h"
+#define DL_MAXPTS_T 6000
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 char *rede_baixar_bin(const char *url, int segundos, long *n) { (void)url; (void)segundos; if (n) *n = 0; return NULL; }
 const char *i18n(const char *s) { return s; }
@@ -32,7 +34,50 @@ static int dialogo(double *t, int max, double fim) {
   return n;
 }
 
-int main(void) {
+// REPLAY (owner 18/11): `doadorleg.sh <log>` tries every file x donor pair the
+// log's "[doadorleg] points" lines carry, the way the match did.
+static int replay(const char *arq) {
+  static double tf[8][DL_MAXPTS_T], td[8][DL_MAXPTS_T];
+  int nf[8] = {0}, nd[8] = {0}, kf[8], kd[8], af[8], ad[8], cf = 0, cd = 0, mesma = 0, semCorte = 0, i, j;
+  char linha[16384], cod[8][16];
+  double pos = 0;
+  FILE *f = fopen(arq, "r");
+  if (!f) { perror(arq); return 1; }
+  memset(cod, 0, sizeof cod);
+  while (fgets(linha, sizeof linha, f)) {
+    char q[16], c[16];
+    int k, pt, n2;
+    const char *p = strstr(linha, "[doadorleg] points");
+    if (!p) continue;
+    if (sscanf(p, "[doadorleg] points: at %lf s, same frame rate %d, as long %d", &pos, &mesma, &semCorte) == 3) { cf = cd = 0; continue; }
+    if (sscanf(p, "[doadorleg] points %15s %d: %*s %15s", q, &k, c) == 3 && !strstr(p, " part ")) {
+      int *cnt = !strcmp(q, "file") ? &cf : &cd;
+      if (*cnt < 8) { (!strcmp(q, "file") ? kf : kd)[*cnt] = k; (!strcmp(q, "file") ? af : ad)[*cnt] = !strcmp(c, "ass") || !strcmp(c, "ssa"); (*cnt)++; }
+      continue;
+    }
+    { int idx = -1, *nn;
+      double *tt;
+      if (sscanf(p, "[doadorleg] points %15s %d part %d/%d", q, &k, &pt, &n2) != 4) continue;
+      if (!strcmp(q, "file")) { for (j = 0; j < cf; j++) if (kf[j] == k) idx = j; if (idx < 0) continue; tt = tf[idx]; nn = &nf[idx]; }
+      else { for (j = 0; j < cd; j++) if (kd[j] == k) idx = j; if (idx < 0) continue; tt = td[idx]; nn = &nd[idx]; }
+      doadorleg_pontos_ler(p, NULL, 0, NULL, NULL, tt, DL_MAXPTS_T, nn); }
+  }
+  fclose(f);
+  printf("replay: at %.1f s, same frame rate %d, as long %d: %d file / %d donor track(s)\n", pos, mesma, semCorte, cf, cd);
+  for (i = 0; i < cf; i++)
+    for (j = 0; j < cd; j++) {
+      double k = 1, d = 0, c = 0, r = nf[i] && nd[j] ? (double)(doa_falas(td[j], nd[j], ad[j]) < doa_falas(tf[i], nf[i], af[i]) ?
+                 doa_falas(td[j], nd[j], ad[j]) : doa_falas(tf[i], nf[i], af[i])) /
+                 (doa_falas(td[j], nd[j], ad[j]) > doa_falas(tf[i], nf[i], af[i]) ? doa_falas(td[j], nd[j], ad[j]) : doa_falas(tf[i], nf[i], af[i])) : 0;
+      char m[200] = "";
+      int ok = doadorleg_alinhar_par(tf[i], nf[i], af[i], "eng", td[j], nd[j], ad[j], "eng", pos, r < 0.5 ? 0.90 : 0.0, mesma, r, semCorte,
+                                     &k, &d, &c, m, sizeof m, nunca, NULL);
+      printf("replay: file %d x donor %d: %s (k %.6f desloc %+.3f conf %.2f) %s\n", kf[i], kd[j], ok ? "FOUND" : "not found", k, d, c, ok ? "" : m);
+    }
+  return 0;
+}
+int main(int argc, char **argv) {
+  if (argc > 1) return replay(argv[1]);
   static double f[4000], d[4000];
   int nf = dialogo(f, 4000, 6000.0), nd, i;
   double k, des;
@@ -128,12 +173,12 @@ int main(void) {
     ok = doadorleg_alinhar_v(fa, nfa, 1, "eng", dn, ndn, 1, "eng", 700.0, 1, &k, &des, &cf, m, sizeof m, nunca, NULL);
     printf("fansub vs CR, plain: %s (%s)\n", ok ? "found" : "not found", m);
     ok = doadorleg_alinhar_par(fa, nfa, 1, "eng", dn, ndn, 1, "eng", 700.0, 0.0, 1, (double)doa_falas(dn, ndn, 1) / doa_falas(fa, nfa, 1),
-                               &k, &des, &cf, m, sizeof m, nunca, NULL);
+                               1, &k, &des, &cf, m, sizeof m, nunca, NULL);
     printf("fansub vs CR, with phrase starts: %s k %.6f desloc %.3f confidence %.2f\n", ok ? "found" : "not found", k, des, cf);
     assert(ok && k == 1.0 && fabs(des - (-1.75)) < 0.15 && cf >= 0.90);
     semente = 777;
     ndn = dialogo(dn, 4000, 1400.0);
-    ok = doadorleg_alinhar_par(fa, nfa, 1, "eng", dn, ndn, 1, "eng", 700.0, 0.0, 1, 0.5, &k, &des, &cf, m, sizeof m, nunca, NULL);
+    ok = doadorleg_alinhar_par(fa, nfa, 1, "eng", dn, ndn, 1, "eng", 700.0, 0.0, 1, 0.5, 1, &k, &des, &cf, m, sizeof m, nunca, NULL);
     printf("unrelated with phrase starts: %s\n", ok ? "FOUND (wrong)" : m);
     assert(!ok);
     { double o[8]; double t[] = { 1.0, 2.0, 3.6, 4.0, 7.0, -1.0, 9.4 };
@@ -174,6 +219,48 @@ int main(void) {
     assert(n == 4 && fabs(o[0] + 3.0) < 0.05 && fabs(md[0] - 0.55) < 1e-9 && a1[0] == 0.30 && a2[0] == 0.80);
     assert(fabs(o[1] + 2.2) < 1e-9 && a2[1] == 0.0);
     assert(doa_match_somar(NULL, NULL, 0, ob, sb, 2, 0.1, o, md, a1, a2, 8) == 2 && md[0] == 0.40); }
+  // 4h. Owner's log 6 (a CR release, 2.1 s off, against a fansub; the CR cut
+  //     6 s longer after 300 s): around the playhead the phrase starts find
+  //     the offset there; the whole-episode pass is not tried (another cut).
+  { static double fa[8000], dn[8000], fala[2000];
+    int nfa = 0, ndn = 0, nl = 0, ok, achados = 0, errados = 0, sd;
+    for (sd = 1; sd <= 12; sd++) {
+      double x = 100.0, cf = 0;
+      nfa = ndn = nl = 0;
+      semente = (unsigned)sd * 7919u;
+      while (x < 1400.0 && nl < 2000) { fala[nl++] = x; x += aleat() < 0.05 ? 8.0 + aleat() * 20.0 : 1.2 + aleat() * 3.5; }
+      for (i = 0; i < nl; i++) {
+        for (int l = 0; l < 3; l++) fa[nfa++] = fala[i] + l * 0.01 + aleat() * 0.04;
+        if (aleat() < 0.3) fa[nfa++] = fala[i] + 1.0 + aleat();
+      }
+      for (int q = 0; q < 120; q++) fa[nfa++] = 100.0 + aleat() * 1300.0;
+      for (i = 0; i < nl; i++) {
+        double t;
+        if (i && aleat() < 0.15) continue;
+        t = fala[i] + 2.1 + (aleat() - 0.5) * 0.6;
+        if (fala[i] > 300.0) t += 6.0;
+        dn[ndn++] = t;
+      }
+      qsort(fa, (size_t)nfa, sizeof *fa, cmpd); qsort(dn, (size_t)ndn, sizeof *dn, cmpd);
+      ok = doadorleg_alinhar_par(fa, nfa, 1, "eng", dn, ndn, 1, "eng", 1019.0, 0.0, 1, 0.6, 0, &k, &des, &cf, m, sizeof m, nunca, NULL);
+      if (ok) { achados++; if (fabs(k * (1019.0 + 8.1) + des - 1019.0) > 0.4) errados++; }
+    }
+    printf("CR vs fansub with a cut, around the playhead: %d of 12 found, %d wrong\n", achados, errados);
+    assert(achados >= 8 && errados == 0); }
+  // 4i. The points in the log and back (the host replay).
+  { double t[5] = { 3.21, 3.25, 7.0, 1423.99, 1424.0 }, r[8];
+    char linha[512], q[16];
+    int n = 0, kk = 0, pp = 0;
+    FILE *f = tmpfile();
+    int velho = dup(1);
+    fflush(stdout); dup2(fileno(f), 1);
+    doadorleg_pontos_log("donor", 3, NULL, t, 5);
+    fflush(stdout); dup2(velho, 1); close(velho);
+    rewind(f);
+    while (fgets(linha, sizeof linha, f)) doadorleg_pontos_ler(linha, q, sizeof q, &kk, &pp, r, 8, &n);
+    fclose(f);
+    assert(n == 5 && kk == 3 && !strcmp(q, "donor"));
+    for (i = 0; i < 5; i++) assert(fabs(r[i] - t[i]) < 0.006); }
   // 4c. What a file is from its first bytes (the donor server opens MKV/MP4).
   { unsigned char b[400];
     memset(b, 0, sizeof b);
