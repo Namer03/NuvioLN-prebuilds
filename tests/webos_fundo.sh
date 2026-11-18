@@ -18,6 +18,8 @@ fim = src.index('void video_definir_reconexao(int sim)', ini)
 decl_ini = src.index('#ifndef FUNDO_PRAZO_MS')
 decl_fim = src.index('static Uint32 fundoEm, fundoRetEm, fundoPousouEm;', decl_ini)
 decl_fim = src.index('\n', decl_fim) + 1
+pc = src.index('int video_pausa_confirmada(void) {')
+pausa = src[pc:src.index('\n}\n', pc) + 3]
 Path(sys.argv[1]).write_text(r'''
 #include <assert.h>
 #include <math.h>
@@ -47,7 +49,7 @@ static void chamar(const char *m, const char *b, void (*cb)(void)) {
   (void)cb;
   if (!strcmp(m, "setVolume")) volume = strstr(b, "\"volume\":0}") ? 0 : 100;
 }
-static void pararSessao(void) { paradas++; midia[0] = 0; pronto = tocando = 0; pausaPedida = 0; recarregarPausa = -1; seekEnvEm = 0; }
+static void pararSessao(void) { paradas++; midia[0] = 0; dtsSessao = NULL; pronto = tocando = 0; pausaPedida = 0; recarregarPausa = -1; seekEnvEm = 0; }
 static int recarregarMesmaFonte(double alvo, int aud, int leg, const char *legUrl) {
   pararSessao(); cargas++;
   if (cargaFalha) { cargaFalha--; return 0; }
@@ -56,9 +58,20 @@ static int recarregarMesmaFonte(double alvo, int aud, int leg, const char *legUr
   if (alvo > 1.0) posAoCarregar = alvo;
   return 1;
 }
+/* O caminho do DTS/DV (iniciarDts): abre com a lista dele, no posSeg, com a
+ * pausa pedida; sem abrir, volta ao player da TV no ponto (dtsVoltarNativo). */
+static int bindVivoT, dtsAbre = 1, dtsInicios, dtsPausado;
+static double dtsPonto;
+static int bindAtivo(void) { return bindVivoT; }
+static int iniciarDts(int s) {
+  (void)s; dtsInicios++; dtsTentou = 1;
+  if (!dtsAbre) { recarregarMesmaFonte(posSeg, -1, -1, legUrlAtual); return 0; }
+  dtsPonto = posSeg; dtsPausado = pausaPedida; dtsSessao = (void *)1; pronto = 0;
+  return 1;
+}
 static int fundoQuerTocarDe(void);
 static void video_pausar(int p);
-''' + src[decl_ini:decl_fim] + src[ini:fim] + r'''
+''' + src[decl_ini:decl_fim] + src[ini:fim] + 'static int pausaConfirmada;\nstatic int video_reconectando(void) { return 0; }\n' + pausa + r'''
 static void video_pausar(int p) {
   if (fundoSusp) { fundoQuerTocar = !p; return; }
   if (fundoRet) { fundoQuerTocar = !p; if (recarregarPausa >= 0) recarregarPausa = !!p; pausaPedida = !!p; }
@@ -90,6 +103,7 @@ static void tocandoEm(double p) {
   snprintf(midia, sizeof midia, "m0"); dtsSessao = NULL; dtsModoDv = 0;
   seekEm = seekEnvEm = seekRetryEm = 0; recarregarPausa = -1; volume = 100;
   paradas = cargas = pausas = cargaFalha = 0;
+  bindVivoT = 0; dtsAbre = 1; dtsInicios = 0; dtsPausado = -1; dtsPonto = -1;
 }
 #define OK(c, msg) do { if (!(c)) { printf("FAIL: %s (line %d)\n", msg, __LINE__); return 1; } } while (0)
 int main(void) {
@@ -117,15 +131,35 @@ int main(void) {
   OK(recarregarPausa == 0 && fundoQuerTocar, "Play during the reopen is kept");
   midiaChegou(); carregou(7200); seekDone(); quadros(1);
   OK(!fundoRet && tocando && volume == 100, "ends playing");
+  /* Play na tecla que trouxe o app de volta (main.c marca a volta, o player
+   * recebe a mesma tecla antes do video_bombear): termina tocando. */
+  tocandoEm(300); video_webos_fundo(-1.0, "window hidden");
+  video_webos_voltou("key pressed"); video_pausar(0);
+  fundoVoltouPend = 0; fundoComecar();
+  OK(fundoQuerTocar == 1 && recarregarPausa == 0, "Play pressed with the returning key is kept");
+  midiaChegou(); carregou(7200); seekDone(); quadros(1); OK(!fundoRet && tocando, "and it ends playing");
+  /* "Manter o video pronto ao sair": nada a reter fora da tela nem reabrindo. */
+  tocandoEm(80); pausaPedida = 1; pausaConfirmada = 1; tocando = 0;
+  OK(video_pausa_confirmada(), "a normal paused session can be retained");
+  video_webos_fundo(-1.0, "window hidden"); fundoComecar(); video_webos_retomada_evento();
+  midiaChegou(); carregou(7200); pausaConfirmada = 1;
+  OK(!video_pausa_confirmada(), "no retained session while reopening (muted, seek pending)");
+  seekDone(); quadros(1); OK(!fundoRet && video_pausa_confirmada(), "retainable again once landed");
   /* 4. Erro: uma nova tentativa; o segundo erro desiste (evento 2). */
   tocandoEm(50); video_webos_fundo(-1.0, "window hidden"); fundoComecar(); video_webos_retomada_evento();
   reconErroPend = 1; quadros(1); OK(cargas == 2 && fundoRet, "one more try after an error");
   reconErroPend = 1; quadros(1); OK(!fundoRet && fundoDesistiu && video_webos_retomada_evento() == 2, "second error gives up");
+  /* Desistir com o pipeline carregado (mudo): ele e solto, e a posicao fica
+   * no ponto para o progresso gravado na saida. */
+  tocandoEm(60); video_webos_fundo(-1.0, "window hidden"); fundoComecar(); video_webos_retomada_evento();
+  midiaChegou(); carregou(7200); reconErroPend = 1; quadros(1);
+  midiaChegou(); carregou(7200); posSeg = 3; reconErroPend = 1; quadros(1);
+  OK(fundoDesistiu && !pronto && !midia[0] && posSeg == 60, "give-up releases the loaded pipeline, position stays on the point");
   /* 5. Sem imagem em 20 s desiste; no caminho do DV, 45 s. */
   tocandoEm(50); video_webos_fundo(-1.0, "window hidden"); fundoComecar(); video_webos_retomada_evento();
   quadros(199); OK(fundoRet, "still waiting at 19.9 s"); quadros(2); OK(fundoDesistiu, "gives up at 20 s");
-  tocandoEm(50); dtsModoDv = 1; video_webos_fundo(-1.0, "window hidden"); fundoComecar(); video_webos_retomada_evento();
-  OK(fundoEraDv && cargas == 1, "DV session reopens through a fresh load");
+  tocandoEm(50); dtsModoDv = 1; dtsSessao = (void *)1; video_webos_fundo(-1.0, "window hidden"); fundoComecar(); video_webos_retomada_evento();
+  quadros(1); OK(fundoEraDv && cargas == 0 && dtsInicios == 1 && dtsModoDv, "DV session reopens through its own path");
   quadros(300); OK(fundoRet, "DV path still waiting at 30 s"); quadros(160); OK(fundoDesistiu, "DV path gives up at 45 s");
   /* 6. Load que nem sai: conta como erro (nova tentativa). */
   tocandoEm(70); video_webos_fundo(-1.0, "window hidden"); cargaFalha = 1; fundoComecar();
@@ -137,12 +171,35 @@ int main(void) {
   video_webos_fundo(-1.0, "window hidden"); OK(fundoAlvo == 333, "reconnect target wins");
   tocandoEm(100); video_webos_fundo(-1.0, "window hidden"); fundoComecar(); midiaChegou();
   OK(video_webos_fundo(-1.0, "window hidden") == 1 && fundoAlvo == 100 && fundoSusp && cargaAud == 2, "leaving again while reopening keeps the point and tracks");
-  /* 8. Intocados: trailer (sem reconexao), canal ao vivo, fonte que falhou, fim. */
+  /* 8. DTS: de volta direto pela conversao, com a lista dela (o indice da
+   * faixa nao vale na lista da TV), no ponto, pausado, sem load nativo nem mudo. */
+  tocandoEm(2500); dtsSessao = (void *)1; video_webos_fundo(-1.0, "window hidden");
+  OK(fundoEraDts && !dtsSessao, "DTS worker closed on leaving");
+  bindVivoT = 1; fundoComecar(); video_webos_retomada_evento(); quadros(3);
+  OK(dtsInicios == 0 && cargas == 0, "waits for the old video plane bind");
+  bindVivoT = 0; quadros(1);
+  OK(dtsInicios == 1 && cargas == 0 && dtsPonto == 2500 && dtsPausado == 1 && volume == 100 && audioAtual == 2,
+     "DTS reopens through the converter at the point, paused, same track list, no native load");
+  pronto = 1; quadros(1); OK(!fundoRet, "lands when the converter is prepared");
+  /* DTS path that does not open: the TV player at the point, muted and paused. */
+  tocandoEm(1800); dtsSessao = (void *)1; video_webos_fundo(-1.0, "window hidden");
+  dtsAbre = 0; fundoComecar(); quadros(1);
+  OK(dtsInicios == 1 && cargas == 1 && recarregarPausa == 1 && posAoCarregar == 1800, "converter fallback reopens paused at the point");
+  midiaChegou(); OK(volume == 0, "fallback load muted");
+  carregou(7200); seekDone(); quadros(1); OK(!fundoRet && volume == 100 && posSeg == 1800, "fallback lands with sound back");
+  /* 9. Intocados: trailer (sem reconexao), canal ao vivo, fonte que falhou, fim. */
   tocandoEm(10); reconPermitida = 0; OK(video_webos_fundo(-1.0, "window hidden") == 0 && paradas == 0, "trailer untouched");
   tocandoEm(10); modoLoad = 1; OK(video_webos_fundo(-1.0, "window hidden") == 0, "live untouched");
   tocandoEm(10); falhou = 1; OK(video_webos_fundo(-1.0, "window hidden") == 0, "failed source untouched");
   tocandoEm(10); terminou = 1; OK(video_webos_fundo(-1.0, "window hidden") == 0, "ended title untouched");
-  /* 9. Legenda externa volta pela URL. */
+  /* Sair com o titulo seguinte ainda abrindo (sem duracao): a barra nao
+   * mostra a duracao do anterior. */
+  tocandoEm(80); video_webos_fundo(-1.0, "window hidden");   /* titulo 1: 7200 s */
+  fundoZerar();                                              /* video_tocar do titulo 2 */
+  durSeg = 0; pronto = 0; posSeg = 0;
+  video_webos_fundo(-1.0, "window hidden");
+  OK(fundoDur == 0, "no stale duration from the previous title");
+  /* 10. Legenda externa volta pela URL. */
   tocandoEm(10); snprintf(legUrlAtual, sizeof legUrlAtual, "http://127.0.0.1/sub.srt");
   video_webos_fundo(-1.0, "window hidden"); fundoComecar();
   OK(cargaLeg == -1 && !strcmp(cargaLegUrl, "http://127.0.0.1/sub.srt"), "external subtitle comes back by URL");
