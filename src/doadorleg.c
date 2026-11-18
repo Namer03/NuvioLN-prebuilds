@@ -262,6 +262,8 @@ static int alinharMin(const double *ta, int na, int assA, const char *la, const 
 // ~300 runs with a cut. It runs only when the lengths agree (semCorte).
 #define DL_FRASE_S  2.5
 #define DL_JANELA_S 300.0
+#define DL_FRENTE_ANTES 30.0
+#define DL_FRENTE_S 270.0
 int doadorleg_frases(const double *t, int n, double gap, double *o) {
   int i, m = 0;
   double u = -1e18;
@@ -292,6 +294,25 @@ int doadorleg_alinhar_par(const double *ta, int na, int assA, const char *la, co
            DL_FRASE_S, j0, j1, ma, mb);
     achou = j1 - j0 >= 120.0 &&
             alinharMin(fa, ma, 0, la, fb, mb, 0, lb, pos, cm, j0, j1, mesmaVel, k, desloc, conf, m2, sizeof m2, cancelar, u);
+    // FROM THE PLAYHEAD ON (owner 18/11, log 13: a WEB release cut another
+    // way, -7.0/-8.9/-7.9/-9.9 s by stretch; +-5 min held two of them and was
+    // refused): only when +-5 min refuses, a window that starts DL_FRENTE_ANTES
+    // before the playhead and runs DL_FRENTE_S on (what plays next). Log 13
+    // replay: -9.914 s (0.92; the audio said -10.164, the refine closes it).
+    // Synthetic CR/fansub with a cut: 11/12 -> 12/12 found, 0 wrong, unrelated
+    // still refused; as the only window it found 8/12, so it stays second.
+    if (!achou && j1 - j0 >= 120.0 && !(cancelar && cancelar(u))) {
+      double f0 = pos - DL_FRENTE_ANTES, f1 = pos + DL_FRENTE_S;
+      if (f0 < ini) f0 = ini;
+      if (f1 > fim) f1 = fim;
+      if (f1 - f0 >= 120.0 && (f0 > j0 + 30.0 || f1 < j1 - 30.0)) {
+        char m4[64] = "";
+        printf("[doadorleg] phrase starts from the playhead on (%.0f-%.0f s of the file): the +-5 min window held more than one offset\n",
+               f0, f1);
+        achou = alinharMin(fa, ma, 0, la, fb, mb, 0, lb, pos, cm, f0, f1, mesmaVel, k, desloc, conf, m4, sizeof m4, cancelar, u);
+        if (!achou) snprintf(m2 + strlen(m2), sizeof m2 - strlen(m2), ", ahead: %.20s", m4);
+      }
+    }
     if (!achou && j1 - j0 < 120.0) snprintf(m2, sizeof m2, "the track is too short for a window");
     if (!achou && !(cancelar && cancelar(u))) {
       if (semCorte) {

@@ -246,7 +246,33 @@ int main(int argc, char **argv) {
       if (ok) { achados++; if (fabs(k * (1019.0 + 8.1) + des - 1019.0) > 0.4) errados++; }
     }
     printf("CR vs fansub with a cut, around the playhead: %d of 12 found, %d wrong\n", achados, errados);
-    assert(achados >= 8 && errados == 0); }
+    assert(achados >= 11 && errados == 0); }
+  // 4h. ANOTHER EDIT, SEVERAL CUTS (log 13): the donor runs 7.0 s ahead, then
+  // 8.9, 7.9 and 9.6 s by stretch; the playhead sits 76 s after the last
+  // change. +-5 min holds two offsets; from the playhead on there is one.
+  { static double fa[8000], dn[8000], fala[2000];
+    int nfa, ndn, nl, ok, achados = 0, errados = 0, sd;
+    for (sd = 1; sd <= 12; sd++) {
+      double x = 3.0, cf = 0;
+      nfa = ndn = nl = 0;
+      semente = (unsigned)sd * 104729u;
+      while (x < 1420.0 && nl < 2000) { fala[nl++] = x; x += aleat() < 0.05 ? 8.0 + aleat() * 20.0 : 1.2 + aleat() * 3.5; }
+      for (i = 0; i < nl; i++) {
+        for (int l = 0; l < 3; l++) fa[nfa++] = fala[i] + l * 0.01 + aleat() * 0.04;
+        if (aleat() < 0.3) fa[nfa++] = fala[i] + 1.0 + aleat();
+      }
+      for (i = 0; i < nl; i++) {
+        double t = fala[i], adiante = t < 180.0 ? 7.0 : t < 700.0 ? 8.9 : t < 1010.0 ? 7.9 : 9.6;
+        if (aleat() < 0.2) continue;
+        dn[ndn++] = t + adiante + (aleat() - 0.5) * 0.4;
+      }
+      qsort(fa, (size_t)nfa, sizeof *fa, cmpd); qsort(dn, (size_t)ndn, sizeof *dn, cmpd);
+      ok = doadorleg_alinhar_par(fa, nfa, 1, "eng", dn, ndn, 0, "eng", 1086.5, 0.0, 1, 0.6, 0, &k, &des, &cf, m, sizeof m, nunca, NULL);
+      if (ok) { achados++; if (fabs(k * (1086.5 + 9.6) + des - 1086.5) > 0.4) errados++; }
+    }
+    printf("another edit with several cuts, from the playhead on: %d of 12 found, %d wrong\n", achados, errados);
+    // 8/12 with the forward window; 0/12 without it (the +-5 min pass alone).
+    assert(achados >= 7 && errados == 0); }
   // 4i. The points in the log and back (the host replay).
   { double t[5] = { 3.21, 3.25, 7.0, 1423.99, 1424.0 }, r[8];
     char linha[512], q[16];
