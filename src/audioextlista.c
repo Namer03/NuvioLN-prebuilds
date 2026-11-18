@@ -14,7 +14,7 @@ static int casa(const char *a, const char *b) {
 // converted (DTS only while DTS conversion is on).
 static int codecUsavel(int c, int semDts) { return !(semDts && c == AEXT_DTS); }
 
-typedef struct { AudioExtCand c; int cache, canais, codec, ordemAddon, nivel, atmos; uint64_t bytes; } Item;
+typedef struct { AudioExtCand c; int cache, canais, codec, ordemAddon, nivel, atmos, legendas; uint64_t bytes; } Item;
 static int ordemDoAddon;   // AudioExtOpcoes.ordemAddon, for cmpItem
 
 // 5.1 or more first, then channels not declared (add-ons often leave them out
@@ -44,6 +44,11 @@ static int cmpItem(const void *pa, const void *pb) {
   const Item *a = pa, *b = pb;
   if (a->c.grupo != b->c.grupo) return a->c.grupo - b->c.grupo;
   if (a->c.grupo == AEXT_G_OUTRA) { int k = strcasecmp(a->c.idioma, b->c.idioma); if (k) return k; }
+  // DTS/TrueHD (converted) stay last; above them, versions WITH SUBTITLES
+  // first (owner 18/11: the sync matches subtitles before the audio, which
+  // is quicker and surer), then audio-only containers, then the others.
+  { int ca = a->nivel == 2, cb = b->nivel == 2; if (ca != cb) return ca - cb; }
+  if (a->legendas != b->legendas) return b->legendas - a->legendas;
   if (a->nivel != b->nivel) return a->nivel - b->nivel;
   if (ordemDoAddon) {
     if (a->ordemAddon != b->ordemAddon) return a->ordemAddon - b->ordemAddon;
@@ -117,6 +122,7 @@ int audioext_lista(const AudioExtEntrada *e, int n, const AudioExtOpcoes *o, Aud
       if (nl > 0) snprintf(it[m].c.idioma, sizeof it[m].c.idioma, "%s", s->idiomas[j]);
       it[m].cache = s->cache; it[m].canais = s->canais; it[m].codec = s->codec; it[m].bytes = s->bytes;
       it[m].ordemAddon = s->ordemAddon; it[m].nivel = audioext_nivel(s); it[m].atmos = s->atmos;
+      it[m].legendas = s->legendas != 0;
       m++;
     }
   }

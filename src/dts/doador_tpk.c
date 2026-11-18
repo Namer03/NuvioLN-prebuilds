@@ -37,7 +37,7 @@ int  doa_pedidos_audio(void) { return 0; }
 int  doa_pedidos(void) { return 0; }
 int  doa_legendas(int f, DoaLegInfo *o, int m) { (void)f; (void)o; (void)m; return 0; }
 int  doa_legenda_tempos(int f, int k, double *t, int m) { (void)f; (void)k; (void)t; (void)m; return 0; }
-void doa_aplicar_legendas(double k, double d) { (void)k; (void)d; }
+void doa_aplicar_legendas(double k, double d, double c) { (void)k; (void)d; (void)c; }
 void doa_dopasuj_fino(void) {}
 #else
 
@@ -272,6 +272,7 @@ typedef struct Sessao {
   char dicaLingua[16], dicaCodec[24], dicaTitulo[96]; int dicaCanais;   // series memory's track
   int difOk, difCorte, difVel, difPpm; // doa_diferenca
   double fpsRazao;                     // the donor's frame rate / the file's (0 unknown)
+  double legConf, legDesloc;           // the last subtitle match (confidence 0 none; fo[1].desloc it set)
   int ppmPedido;                       // DoaAbrir.doador_ppm
   // automatic match (mm guards the sides while a tap feeds them)
   pthread_mutex_t mm;
@@ -1082,6 +1083,32 @@ static void *matchFio(void *u) {
       printf("[doador] match: ratio %.5f: %s offset %d ms (was %d) score %.2f margin %.2f\n", ks[q],
              got && r.confident ? "found" : "not trusted", got ? msDe(s, r.offset_s, ks[q]) : 0, s->doadorMs, got ? r.score : 0.0, got ? r.margin : 0.0);
       if (got && r.confident && (!achou || r.score > score)) { achou = 1; como = fino ? 7 : 1; off = r.offset_s; razao = ks[q]; score = r.score; }
+    }
+    // 1b. SUBTITLES + AUDIO (owner 18/11, "add up the score"): the refine's
+    // candidates get the subtitle match's share on top of their audio score.
+    // Subtitles written by different people start lines a few hundred ms
+    // apart (log 9: subtitles +2347, audio +1980, the owner confirmed 1980),
+    // so within 0.5 s of their offset they back every candidate the same and
+    // the audio decides; farther, their share fades. A candidate the audio
+    // alone did not trust is taken when the sum is clear.
+    if (fino && s->legConf > 0 && ncand > 0) {
+      int mi = -1;
+      double mv = -1, seg = -1;
+      for (i = 0; i < ncand; i++) {
+        double dd = fabs(cand[i] - s->legDesloc), sub = s->legConf * 0.5 * (dd <= 0.5 ? 1.0 : exp(-pow((dd - 0.5) / 0.3, 2)));
+        double v = candSc[i] + sub;
+        printf("[doador] match (subtitles + audio): %+d ms: audio %.2f + subtitles %.2f = %.2f\n", msDe(s, cand[i], k0), candSc[i], sub, v);
+        if (v > mv) { seg = mv; mv = v; mi = i; } else if (v > seg) seg = v;
+      }
+      if (mi >= 0 && candSc[mi] >= 0.30 && (seg < 0 || mv - seg >= 0.10)) {
+        if (!achou || fabs(off - cand[mi]) > 0.05)
+          printf("[doador] match (subtitles + audio): %+d ms wins (%.2f, next %.2f)\n", msDe(s, cand[mi], k0), mv, seg < 0 ? 0.0 : seg);
+        achou = 1; como = 7; off = cand[mi]; razao = k0; score = candSc[mi];
+      } else if (mi >= 0 && achou && fabs(off - cand[mi]) > 0.05) {
+        // The sum is not clear and the audio's own pick is not its winner: no move.
+        printf("[doador] match (subtitles + audio): no clear winner (%.2f vs %.2f): the subtitles' offset stays\n", mv, seg);
+        achou = 0;
+      }
     }
     // 2. Not near (a click, not the follow, not the refine): the donor read
     // on its own where the lengths suggest, +-60 s, +-5 min (webOS match_job_run).
@@ -2273,7 +2300,7 @@ int doa_legenda_tempos(int fonte, int k, double *t, int max) {
 }
 // The subtitle match's line (file = k * donor + desloc) handed to the app as a
 // match result: ms against the session's base at that speed, ppm the speed.
-void doa_aplicar_legendas(double k, double desloc) {
+void doa_aplicar_legendas(double k, double desloc, double conf) {
   Sessao *s = pegar();
   if (s && s->pronto && s->nfo > 1 && !s->fo[1].falhou && k > 0.9 && k < 1.1) {
     DoaDopasuj r;
@@ -2282,6 +2309,7 @@ void doa_aplicar_legendas(double k, double desloc) {
     r.ppm = fabs(k - 1.0) > 0.0002 ? (int)lround((k - 1.0) * 1e6) : 0;
     r.como = 6;
     pthread_mutex_lock(&s->m);
+    s->legConf = conf > 0 ? conf : 0.5; s->legDesloc = baseDe(s, k) + r.ms / 1000.0;
     if (s->mEstado != 1) {
       s->mRes = r; s->mEstado = 2; s->mNovo = 1; s->mAuto = 1; s->mFino = 0;
       printf("[doador] subtitle match: file = %.6f x donor %+.3f s -> offset %+d ms, speed %+d ppm (was %+d ms)\n", k, desloc, r.ms,

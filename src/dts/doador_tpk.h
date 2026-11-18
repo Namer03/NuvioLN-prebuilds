@@ -151,8 +151,11 @@ int  doa_legenda_tempos(int fonte, int k, double *t, int max);
 /* The subtitle match's result: the file's time = k * the donor's time + desloc
  * (container times). Handed to the app like a match (doa_dopasuj_resultado,
  * como 6, automatico 1): ms and ppm against the session's base. */
-void doa_aplicar_legendas(double k, double desloc);
+void doa_aplicar_legendas(double k, double desloc, double conf);
 /* SECOND LEVEL: the audio match refining the offset in force (+-1 s, about
- * 40 s of playback, no wide search). como 7. */
+ * 40 s of playback, no wide search). como 7. After a subtitle match its
+ * candidates are scored audio + subtitles (owner 18/11): within 0.5 s of the
+ * subtitles' offset (their own precision) the audio decides; farther, the
+ * subtitles' share fades. */
 void doa_dopasuj_fino(void);
 #endif

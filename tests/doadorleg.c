@@ -92,6 +92,14 @@ int main(void) {
   // 5. The line: two points, snapped to the known ratio.
   assert(doadorleg_reta(100.0, 100.1, 700.0, 700.7, &k, &des) && fabs(k - 23976.0 / 24000.0) < 1e-9);
   assert(!doadorleg_reta(100.0, 100.0, 110.0, 110.0, &k, &des));
+  // 5b. Owner's log 9 (Fight Club French, 18/11): a +354 ppm slope from two
+  //     subtitle tracks by different people is no real speed: 1, and the
+  //     offset at the playhead (t1), not the average of the two points.
+  assert(doadorleg_reta(1827.6, 1825.438, 2427.6, 2425.225, &k, &des) && k == 1.0 && fabs(des - 2.162) < 1e-6);
+  //     The same frame rate in both containers: only 1, even near 24/23.976.
+  assert(doadorleg_reta_v(100.0, 100.1, 700.0, 700.7, 1, &k, &des) && k == 1.0);
+  //     Neither 1 nor a film/TV ratio (2000 ppm): refused.
+  assert(!doadorleg_reta(100.0, 100.0, 700.0, 701.2, &k, &des));
   puts("doadorleg: shift, 24/23.976 speed, unrelated refused, pairs and the line passed");
   return 0;
 }

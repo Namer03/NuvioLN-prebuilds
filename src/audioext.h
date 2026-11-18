@@ -143,6 +143,8 @@ int audioext_dopasuj_ativo(void);
 // for its download (not found).
 typedef struct { int ms, ppm, como, dica_ms, pesado, nkand, kand_ms[3], kand_pct[3], automatico; } AudioExtDopasuj;
 void audioext_dopasuj_resultado(int ok, const AudioExtDopasuj *r);
+/* Changes with every match result applied (the sync editor follows it). */
+unsigned audioext_auto_geracao(void);
 // Once, for a toast: 1 found, -1 not trusted, 0 nothing.
 int audioext_dopasuj_aviso_consumir(AudioExtDopasuj *out);
 // The other version's speed from a match (ppm; 0 the same): the webOS player

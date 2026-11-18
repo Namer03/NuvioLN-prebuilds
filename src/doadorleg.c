@@ -76,20 +76,31 @@ int doadorleg_pares_cruzados(const DoaLegInfo *a, int na, const DoaLegInfo *b, i
 }
 
 int doadorleg_reta(double t1, double d1, double t2, double d2, double *k, double *desloc) {
-  static const double CONH[] = { 24000.0 / 23976.0, 25.0 / 24.0, 25000.0 / 23976.0 };
-  double kk;
+  return doadorleg_reta_v(t1, d1, t2, d2, 0, k, desloc);
+}
+// ONLY REAL SPEEDS (owner's log 9, Fight Club French, 18/11): two releases of
+// one film run at the same speed or at a film/TV ratio, nothing in between.
+// Two subtitle tracks written by different people drift a few hundred ms
+// against each other, and the two-point line read that as +354 ppm: a 2 s
+// drift by the end of the film, and a needless reopen at the "new speed".
+// The measured slope snaps to the nearest real ratio (within 800 ppm) or the
+// line is refused; with the same frame rate in both containers it is 1. The
+// offset is taken at t1 (the playhead), where the viewer is.
+int doadorleg_reta_v(double t1, double d1, double t2, double d2, int mesmaVel, double *k, double *desloc) {
+  static const double CONH[] = { 1.0, 24000.0 / 23976.0, 25.0 / 24.0, 25000.0 / 23976.0,
+                                 23976.0 / 24000.0, 24.0 / 25.0, 23976.0 / 25000.0 };
+  double kk, melhor = 0, dist = 1e9;
   unsigned i;
   if (!isfinite(d1) || !isfinite(d2) || fabs(d2 - d1) < 30.0) return 0;
   kk = (t2 - t1) / (d2 - d1);
   if (kk < 0.95 || kk > 1.05) return 0;
-  // The same speed within the lines' own precision, or a known film/TV ratio.
-  if (fabs(kk - 1.0) < 0.0003) kk = 1.0;
-  for (i = 0; i < sizeof CONH / sizeof *CONH; i++) {
-    if (fabs(kk - CONH[i]) < 0.0003) kk = CONH[i];
-    if (fabs(kk - 1.0 / CONH[i]) < 0.0003) kk = 1.0 / CONH[i];
-  }
-  *k = kk;
-  *desloc = ((t1 - kk * d1) + (t2 - kk * d2)) / 2.0;
+  for (i = 0; i < (mesmaVel ? 1u : sizeof CONH / sizeof *CONH); i++)
+    if (fabs(kk - CONH[i]) < dist) { dist = fabs(kk - CONH[i]); melhor = CONH[i]; }
+  if (dist > (mesmaVel ? 0.003 : 0.0008)) return 0;
+  if (dist > 0.00005)
+    printf("[doadorleg] measured speed %.6f is no real ratio: %.6f used%s\n", kk, melhor, mesmaVel ? " (same frame rate in both files)" : "");
+  *k = melhor;
+  *desloc = t1 - melhor * d1;
   return 1;
 }
 
@@ -128,34 +139,42 @@ typedef struct {
   DoaLegInfo a[DOA_LEG_MAX], b[DOA_LEG_MAX];
   double *ta[DL_PARES], *tb[DL_PARES]; int na[DL_PARES], nb[DL_PARES];
   double pos;
+  int mesmaVel;          // both containers at one frame rate (doa_diferenca): speed 1
   unsigned ger;
 } Pedido;
 
 static pthread_mutex_t trava = PTHREAD_MUTEX_INITIALIZER;
 static atomic_uint geracao;
 static int estado;               // 0 nothing, 1 working, 2 found, 3 not
-static double rk, rd;
+static double rk, rd, rConf;
 static char rMotivo[160];
 
 static int cancelado(void *u) { return (unsigned)(uintptr_t)u != atomic_load(&geracao); }
 
-static void terminar(unsigned ger, int achou, double k, double d, const char *motivo) {
+static void terminar(unsigned ger, int achou, double k, double d, double conf, const char *motivo) {
   pthread_mutex_lock(&trava);
   if (ger == atomic_load(&geracao)) {
-    estado = achou ? 2 : 3; rk = k; rd = d;
+    estado = achou ? 2 : 3; rk = k; rd = d; rConf = conf;
     snprintf(rMotivo, sizeof rMotivo, "%s", motivo ? motivo : "");
   }
   pthread_mutex_unlock(&trava);
 }
 
 static int alinharMin(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
-                      double pos, double confMin, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u);
+                      double pos, double confMin, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
+                      int (*cancelar)(void *), void *u);
 int doadorleg_alinhar(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                       double pos, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
-  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, k, desloc, motivo, mn, cancelar, u);
+  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, 0, k, desloc, NULL, motivo, mn, cancelar, u);
+}
+int doadorleg_alinhar_v(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                        double pos, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
+                        int (*cancelar)(void *), void *u) {
+  return alinharMin(ta, na, assA, la, tb, nb, assB, lb, pos, 0.0, mesmaVel, k, desloc, conf, motivo, mn, cancelar, u);
 }
 static int alinharMin(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
-                      double pos, double confMin, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u) {
+                      double pos, double confMin, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
+                      int (*cancelar)(void *), void *u) {
   double sa[2], sb[2];
   LegendaDocumento *ref = documento(ta, na, assA, la, "file", sa);
   LegendaDocumento *doc = documento(tb, nb, assB, lb, "donor", sb);
@@ -188,9 +207,10 @@ static int alinharMin(const double *ta, int na, int assA, const char *la, const 
     if (t1s < sa[0]) t1s = sa[0];
     d1 = mapa ? autosync_mapa_tempo(mapa, t1s) : t1s + r.offsetMs / 1000.0;
     d2 = mapa ? autosync_mapa_tempo(mapa, t2s) : t2s + r.offsetMs / 1000.0;
-    if (d1 > AUTOSYNC_SEM_LEGENDA / 2 && d2 > AUTOSYNC_SEM_LEGENDA / 2 && doadorleg_reta(t1s, d1, t2s, d2, k, desloc)) achou = 1;
+    if (d1 > AUTOSYNC_SEM_LEGENDA / 2 && d2 > AUTOSYNC_SEM_LEGENDA / 2 && doadorleg_reta_v(t1s, d1, t2s, d2, mesmaVel, k, desloc)) achou = 1;
     else if (!mapa) { *k = 1.0; *desloc = -r.offsetMs / 1000.0; achou = 1; }
-    else snprintf(motivo, mn, "accepted, but no straight line around %.0f s", pos);
+    else snprintf(motivo, mn, "accepted, but no real speed around %.0f s", pos);
+    if (achou && conf) *conf = r.confianca;
     if (achou)
       printf("[doadorleg] the file's %.1f s = the donor's %.3f s, %.1f s = %.3f s: file = %.6f x donor %+.3f s\n", t1s, d1, t2s, d2, *k, *desloc);
   } else snprintf(motivo, mn, "%s", autosync_motivo(r.motivo));
@@ -203,7 +223,7 @@ static int alinharMin(const double *ta, int na, int assA, const char *la, const 
 static void *fio(void *u) {
   Pedido *p = u;
   int i, achou = 0;
-  double k = 1, d = 0;
+  double k = 1, d = 0, conf = 0;
   char motivo[160] = "no pair of subtitle tracks in the same language";
   for (i = 0; i < p->n && !achou && !cancelado((void *)(uintptr_t)p->ger); i++) {
     const DoaLegInfo *a = &p->a[p->ia[i]], *b = &p->b[p->ib[i]];
@@ -211,10 +231,10 @@ static void *fio(void *u) {
     printf("[doadorleg] pair %d%s: file %s %s \"%.30s\" / donor %s %s \"%.30s\"\n", i + 1, p->cruzado ? " (two languages)" : "",
            a->lingua[0] ? a->lingua : "und", a->codec, a->nome, b->lingua[0] ? b->lingua : "und", b->codec, b->nome);
     achou = alinharMin(p->ta[i], p->na[i], ehAss(a), a->lingua, p->tb[i], p->nb[i], ehAss(b), b->lingua, p->pos,
-                       p->cruzado ? DL_CONF_CRUZADO : 0.0, &k, &d, m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
+                       p->cruzado ? DL_CONF_CRUZADO : 0.0, p->mesmaVel, &k, &d, &conf, m, sizeof m, cancelado, (void *)(uintptr_t)p->ger);
     if (!achou) snprintf(motivo, sizeof motivo, "pair %d (%s %s / %s %s): %s", i + 1, a->lingua, a->codec, b->lingua, b->codec, m);
   }
-  terminar(p->ger, achou, k, d, achou ? "" : motivo);
+  terminar(p->ger, achou, k, d, conf, achou ? "" : motivo);
   for (i = 0; i < p->n; i++) { free(p->ta[i]); free(p->tb[i]); }
   free(p);
   return NULL;
@@ -226,8 +246,10 @@ void doadorleg_iniciar(double pos) {
   pthread_t t;
   unsigned ger = atomic_fetch_add(&geracao, 1) + 1;
   pthread_mutex_lock(&trava); estado = 1; rMotivo[0] = 0; pthread_mutex_unlock(&trava);
-  if (!p) { terminar(ger, 0, 1, 0, "out of memory"); return; }
+  if (!p) { terminar(ger, 0, 1, 0, 0, "out of memory"); return; }
   p->ger = ger; p->pos = pos;
+  { int corte = 0, vel = 1, ppm = 0;
+    p->mesmaVel = doa_diferenca(&corte, &vel, &ppm) && !vel; }
   na = doa_legendas(0, p->a, DOA_LEG_MAX);
   nb = doa_legendas(1, p->b, DOA_LEG_MAX);
   p->n = doadorleg_pares(p->a, na, p->b, nb, ling_casa, p->ia, p->ib, DL_PARES);
@@ -244,13 +266,13 @@ void doadorleg_iniciar(double pos) {
     p->nb[i] = p->tb[i] ? doa_legenda_tempos(1, p->ib[i], p->tb[i], DL_MAXPTS) : 0;
   }
   if (!p->n) {
-    terminar(ger, 0, 1, 0, na && nb ? "no pair of full subtitle tracks (forced only, or line counts too far apart)" : !na ? "the file's subtitles are not in its index"
+    terminar(ger, 0, 1, 0, 0, na && nb ? "no pair of full subtitle tracks (forced only, or line counts too far apart)" : !na ? "the file's subtitles are not in its index"
                                                                          : "the donor's subtitles are not in its index");
     free(p);
     return;
   }
   if (pthread_create(&t, NULL, fio, p) != 0) {
-    terminar(ger, 0, 1, 0, "no thread");
+    terminar(ger, 0, 1, 0, 0, "no thread");
     for (i = 0; i < p->n; i++) { free(p->ta[i]); free(p->tb[i]); }
     free(p);
     return;
@@ -261,13 +283,14 @@ void doadorleg_cancelar(void) {
   atomic_fetch_add(&geracao, 1);
   pthread_mutex_lock(&trava); estado = 0; pthread_mutex_unlock(&trava);
 }
-int doadorleg_resultado(double *k, double *desloc, char *motivo, size_t n) {
+int doadorleg_resultado(double *k, double *desloc, double *conf, char *motivo, size_t n) {
   int v = 0;
   pthread_mutex_lock(&trava);
   if (estado == 2 || estado == 3) {
     v = estado == 2 ? 1 : -1;
     if (k) *k = rk;
     if (desloc) *desloc = rd;
+    if (conf) *conf = rConf;
     if (motivo && n) snprintf(motivo, n, "%s", rMotivo);
     estado = 0;
   }

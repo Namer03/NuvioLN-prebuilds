@@ -23,7 +23,7 @@ void doadorleg_iniciar(double pos);
 void doadorleg_cancelar(void);
 /* 0 nothing yet / not started, 1 found (*k, *desloc), -1 not possible or not
  * sure (why in `motivo`). Each outcome is returned once. */
-int  doadorleg_resultado(double *k, double *desloc, char *motivo, size_t n);
+int  doadorleg_resultado(double *k, double *desloc, double *conf, char *motivo, size_t n);
 
 /* Pure parts, for the test. The pairs worth trying (file track, donor track),
  * best first: same language, then the same kind (SDH with SDH, forced never),
@@ -36,7 +36,14 @@ int  doadorleg_pares_cruzados(const DoaLegInfo *a, int na, const DoaLegInfo *b, 
 /* Start times -> a line from the two-point map. `donorDe(t)` = the donor's
  * time at the file's t. Fills k (file seconds per donor second) and desloc. */
 int  doadorleg_reta(double t1, double d1, double t2, double d2, double *k, double *desloc);
+/* The same with what the containers say: mesmaVel (one frame rate in both)
+ * allows speed 1 only. The slope snaps to a real ratio (1, 24/23.976, 25/24,
+ * 25/23.976 and their inverses) within 800 ppm, else 0; desloc at t1. */
+int  doadorleg_reta_v(double t1, double d1, double t2, double d2, int mesmaVel, double *k, double *desloc);
 /* One pair (start times of the file's track and of the donor's): 1 found. */
 int  doadorleg_alinhar(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
                        double pos, double *k, double *desloc, char *motivo, size_t mn, int (*cancelar)(void *), void *u);
+int  doadorleg_alinhar_v(const double *ta, int na, int assA, const char *la, const double *tb, int nb, int assB, const char *lb,
+                         double pos, int mesmaVel, double *k, double *desloc, double *conf, char *motivo, size_t mn,
+                         int (*cancelar)(void *), void *u);
 #endif

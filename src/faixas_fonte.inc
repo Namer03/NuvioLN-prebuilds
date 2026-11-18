@@ -1,21 +1,24 @@
 // THE LANGUAGE PAGE inside the audio island (included by faixas.c; owner
 // 17/11/2026: the audio sheet works like the subtitles' one).
 //
-//  EXP_LISTA   one language: this file's own tracks in it first (like the
-//              embedded subtitles; while another source's audio plays, the
-//              donor server's renditions in it), then the other sources'
-//              versions, audio-only containers first, DTS/TrueHD last, at
-//              most 24 (the preference's languages) or 6 (audioextlista.h).
+//  EXP_LISTA   one language: this file's own tracks in it first, from the
+//              file whatever plays (DTS/TrueHD too: they convert), "In this
+//              file" (like the embedded subtitles), a divider, then the other
+//              sources' versions: with subtitles first (the sync matches by
+//              them), audio-only containers first, DTS/TrueHD last, at most 24
+//              (the preference's languages) or 6 (audioextlista.h).
 //  EXP_FAIXAS  the audio tracks of one version (hold OK on it), read from its
 //              header like the source list's "Choose audio track…".
 //
 // OK uses the track or the version (audioext_escolher) and closes the sheet;
 // Back goes one page up. The picture keeps playing all along.
 enum { EXP_NADA = 0, EXP_LISTA, EXP_FAIXAS };
+#define EX_SEP_H 34.0f   // the divider between this file's tracks and the other sources' versions
 #define EX_LIN_MAX 160
 static int exPag, exFoco, exRol, exVoltar;
 // The page's language (its group code, "" = Unknown) and its rows: this
-// file's tracks (indexes in video_audio), then versions (indexes in extAll).
+// file's tracks (indexes in arqF, video_audio_arquivo), then versions
+// (indexes in extAll).
 static char exLingCod[8];
 static int exRowF[EX_LIN_MAX], exRowV[EX_LIN_MAX], exNF, exNV, exLinN;
 static CtxHold exHold;
@@ -38,10 +41,10 @@ static int exFaixaDaLinha(int i) { return exFocavel(i) && i < exNF ? exRowF[i] :
 // The rows of the page. The focus stays on the same track / version when the
 // list grows (versions arrive with the add-ons).
 static void exMontarLinhas(int focF, int focIdx) {
-  int nA = video_n_audio();
+  int nA = arqTotal();
   exNF = exNV = 0;
   for (int i = 0; i < nA && exNF < EX_LIN_MAX; i++) {
-    const VideoFaixa *f = video_audio(i);
+    const VideoFaixa *f = arqFaixa(i);
     if (auMesmo(f ? f->idioma : "", exLingCod)) exRowF[exNF++] = i;
   }
   for (int i = 0; i < extAllN && exNV < EX_LIN_MAX; i++)
@@ -74,7 +77,13 @@ static void exAbrir(int g) {
   extMontar(1);
   exPag = EXP_LISTA; exRol = 0;
   ctxhold_cancelar(&exHold);
-  exMontarLinhas(video_audio_atual(), -1);
+  { int fa = video_audio_arquivo_atual();
+    // Another source plays: the focus on its version (one check, there).
+    const char *u = audioext_url();
+    int vi = -1;
+    if (fa < 0 && u && u[0])
+      for (int i = 0; i < extAllN && vi < 0; i++) { const Stream *st = extFonteIdx(extAll[i].indice); if (st && !strcmp(st->url, u)) vi = extAll[i].indice; }
+    exMontarLinhas(fa, vi); }
   exAjustar();
   printf("[ext-audio] language page: %s, %d track(s) of this file, %d version(s) of other sources\n",
          exLingCod[0] ? exLingCod : "unknown", exNF, exNV);
@@ -133,7 +142,7 @@ static void exOk(void) {
   }
   { int f = exFaixaDaLinha(exFoco);
     const AudioExtCand *c = exCandDaLinha(exFoco);
-    if (f >= 0) { aplicarFaixa(f); exFechar(); aberta = 0; return; }
+    if (f >= 0) { aplicarFaixaArquivo(f); exFechar(); aberta = 0; return; }
     if (!c) return;
     extUsar(c, NULL);
     exFechar(); aberta = 0; }
@@ -212,7 +221,7 @@ static float exConteudoH(void) {
   }
   if (!exLinN) return 60.0f;
   n = exLinN < IL_VIS ? exLinN : IL_VIS;
-  return n * IL_LN_H + (n - 1) * IL_LN_VAO;
+  return n * IL_LN_H + (n - 1) * IL_LN_VAO + (exNF && exNV ? EX_SEP_H : 0.0f);
 }
 static float alturaExt(void) {
   float h = IL_PAD_Y + IL_TIT_H + 14.0f;
@@ -253,16 +262,16 @@ static void exLinhaCand(const AudioExtCand *c, float x, float y, float w, int se
   }
 }
 // One of this file's own tracks on a language page (like an embedded
-// subtitle): its label, "In this file" (or the other source's name while its
-// audio plays: the donor server's renditions), the check on the playing one.
+// subtitle): its label, "In this file", the check when it is what plays (never
+// while another source's audio plays: that version's row has the check).
 static void exLinhaFaixa(int k, float x, float y, float w, int sel, float a) {
-  const VideoFaixa *f = video_audio(k);
+  const VideoFaixa *f = arqFaixa(k);
   char nome[64], sub[160], t[96];
-  int cc = sel ? 255 : 219, cs = 122, ativo = k == video_audio_atual();
+  int cc = sel ? 255 : 219, cs = 122, ativo = k == video_audio_arquivo_atual();
   float dir = x + w - 22.0f;
   partirRotulo(f ? f->rotulo : "", nome, sizeof nome, t, sizeof t);
   sub[0] = 0;
-  if (!audioext_tocando() && !audioext_carregando()) extJuntar(sub, sizeof sub, i18n("In this file"));
+  extJuntar(sub, sizeof sub, i18n("In this file"));
   extJuntar(sub, sizeof sub, t);
   if (sel) plrui_linha_foco((GfxRect){ x, y, w, IL_LN_H }, 22.0f, a);
   rostoIdioma((GfxRect){ x + 22.0f, y + (IL_LN_H - 52.0f) * 0.5f, 52.0f, 52.0f }, f && auCod(f->idioma)[0] ? f->idioma : "?", NULL, sel, a);
@@ -322,6 +331,19 @@ static void corpoExt(GfxRect c, float a) {
       exAjustar();
       for (int i = exRol; i < exLinN && i < exRol + IL_VIS; i++, y += IL_LN_H + IL_LN_VAO) {
         const AudioExtCand *cd = exCandDaLinha(i);
+        // THE DIVIDER (owner 18/11): this file's tracks above, the other
+        // sources' versions below, with the words for them.
+        if (i == exNF && exNF && exNV) {
+          if (i > exRol) {
+            TxtLinha l = txt_linha(TXT_ILHA_APOIO, i18n("Other sources"), 243, 242, 239, 115);
+            float ly = y + (EX_SEP_H - (float)l.h) * 0.5f - IL_LN_VAO * 0.5f;
+            gfx_cor((GfxRect){ x0 + 22.0f, ly + (float)l.h * 0.5f, 18.0f, 1.0f }, 0.0f, 1, 1, 1, 0.14f * a);
+            txt_desenhar_alpha(l, x0 + 22.0f + 18.0f + 12.0f, ly, a);
+            gfx_cor((GfxRect){ x0 + 22.0f + 18.0f + 24.0f + (float)l.w, ly + (float)l.h * 0.5f,
+                               w - 44.0f - 18.0f - 24.0f - (float)l.w, 1.0f }, 0.0f, 1, 1, 1, 0.14f * a);
+          }
+          y += EX_SEP_H;
+        }
         if (cd) exLinhaCand(cd, x0, y, w, i == exFoco, a);
         else if (exFaixaDaLinha(i) >= 0) exLinhaFaixa(exFaixaDaLinha(i), x0, y, w, i == exFoco, a);
       }

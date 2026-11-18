@@ -53,6 +53,7 @@ typedef struct AudioExtEntradaS {
   int ordemAddon;                   // the add-on's place (Stream.addonOrdem), for "Sort like the addons"
   int atmos;                        // Dolby Atmos declared
   int soAudio;                      // MP4/MOV: its audio is read without the picture's bytes
+  int legendas;                     // it declares subtitles (the sync matches by them first)
 } AudioExtEntrada;
 
 typedef struct {

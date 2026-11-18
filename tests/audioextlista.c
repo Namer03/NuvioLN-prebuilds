@@ -98,6 +98,16 @@ int main(void) {
     assert(k == 6 && c[0].indice == 2 && c[1].indice == 1 && c[2].indice == 4 && c[3].indice == 3 && c[4].indice == 0 &&
            c[5].indice == 5);
     assert(audioext_nivel(&f[1]) == 0 && audioext_nivel(&f[0]) == 1 && audioext_nivel(&f[5]) == 2); }
+  // WITH SUBTITLES FIRST (owner 18/11, the sync matches by them): the MKV DD+
+  // with subtitles goes above the MP4s; a converted one with subtitles stays last.
+  { AudioExtEntrada f[4];
+    f[0] = fonte("it", AEXT_DDP, 6, 1, 4); f[0].soAudio = 1;     // MP4, no subtitles
+    f[1] = fonte("it", AEXT_DDP, 6, 1, 9); f[1].legendas = 1;    // MKV with subtitles
+    f[2] = fonte("it", AEXT_TRUEHD, 8, 1, 30); f[2].legendas = 1; // converted: last anyway
+    f[3] = fonte("it", AEXT_DD, 6, 1, 5);                        // MKV, no subtitles
+    o = opc("it", ""); o.semDts = 0;
+    k = audioext_lista(f, 4, &o, c, 64);
+    assert(k == 4 && c[0].indice == 1 && c[1].indice == 0 && c[2].indice == 3 && c[3].indice == 2); }
   // Settings > Addons switched its add-on off: not listed.
   o = opc("pl", "");
   e[7].foraFiltro = 1;

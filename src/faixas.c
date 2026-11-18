@@ -494,9 +494,10 @@ static int volFoco;
 // the Audio sync row of another version replaces the list with rows. UP/DOWN
 // pick a row, LEFT/RIGHT change it, OK confirms and closes, Back cancels and
 // puts the offset back. Every change is heard at once (live).
-enum { SED_OFFSET, SED_PASSO, SED_KAND, SED_DICA, SED_AQUI, SED_ZERAR };
+enum { SED_OFFSET, SED_PASSO, SED_KAND, SED_DICA, SED_AQUI, SED_ZERAR, SED_SCAN };
 #define SED_MAXL 8
 static int sincEd, sincFoco, sincRep, sincPasso = 1, sincOrig;
+static unsigned sincAutoVisto;
 static const int SED_PASSOS[] = { 10, 100, 1000, 10000, 60000, 600000 };
 static int volFocavel(void) { return cacheboost_suportado(); }
 
@@ -511,7 +512,6 @@ static int velVisivel(void) { return video_velocidade_suportada() && !player_id_
 // (Android: ExoPlayer cannot change the tempo of a bitstream it does not decode).
 static int velFocavel(void) { return velVisivel() && !video_velocidade_bloqueada(); }
 
-static int rendMostrado = -1;   // the 4K test row's shown value (FXA_REND)
 static void extMontar(int forcar);
 static int extMenu(void);
 static void auMontar(void);
@@ -541,7 +541,7 @@ void faixas_abrir_em(int col) {
   modo = (col == 1) ? 1 : 0;
   coluna = modo;                 // audio -> col 0; legenda -> col 1
   ctl = -1;
-  volFoco = 0; velFoco = 0; sincEd = 0; rendMostrado = -1;
+  volFoco = 0; velFoco = 0; sincEd = 0;
   exFechar();
   foco[0] = video_audio_atual();
   if (!modo) extMontar(1);
@@ -641,19 +641,37 @@ static int linhaDaLeg(int i) {
 // 24 for the preference's languages, 6 for the others. No "From another
 // source", no "This file's own audio", no "Match automatically": the sync is
 // automatic (subtitles, then audio). Elsewhere the sheet is the track list.
-enum { FXA_FAIXA = 0, FXA_SINC, FXA_IDIOMA, FXA_TODOS, FXA_REND };
-// THE 4K TEST ROW (owner 17/11): how many audio tracks the master the TV gets
-// carries while another source's audio plays. Left/Right change the shown
-// value, OK applies it (reopening a donor that plays). Removed after the test.
-static const int REND_VAL[3] = { 0, 6, 1 };
-static const char *const REND_ROT[3] = { "All", "At most 6", "Only the chosen one" };
-#if defined(NV_TPK)   /* video_tpk.c: the donor session's master */
-int  video_doador_rend_indice(void);
-void video_doador_rend_definir(int indice, int limite);
+enum { FXA_FAIXA = 0, FXA_SINC, FXA_IDIOMA, FXA_TODOS };
+// THE FILE'S OWN AUDIO TRACKS on the language rows and pages (owner 18/11):
+// read from the file whatever plays. Only the chosen track goes to the TV
+// while another source's audio plays (video_tpk.c DOA_REND_LIMITE), so the
+// player's list then holds that one track and none of the file's.
+#define ARQ_MAX 64
+#if defined(NV_TPK)   /* video_tpk.c */
+int  video_audio_arquivo(VideoFaixa *out, int max);
+int  video_audio_arquivo_atual(void);
+void video_escolher_audio_arquivo(int i);
 #else
-static int  video_doador_rend_indice(void) { return 0; }
-static void video_doador_rend_definir(int indice, int limite) { (void)indice; (void)limite; }
+static int video_audio_arquivo(VideoFaixa *out, int max) {
+  int n = video_n_audio(), i;
+  for (i = 0; i < n && i < max; i++) out[i] = *video_audio(i);
+  return i;
+}
+static int  video_audio_arquivo_atual(void) { return video_audio_atual(); }
+static void video_escolher_audio_arquivo(int i) { video_escolher_audio(i); }
 #endif
+static VideoFaixa arqF[ARQ_MAX];
+static int arqN;
+static Uint32 arqLidoEm;
+// Read again at most every 250 ms (the rows ask many times per frame).
+static void arqLer(void) {
+  Uint32 t = SDL_GetTicks();
+  if (arqLidoEm && t - arqLidoEm < 250u) return;
+  arqLidoEm = t ? t : 1;
+  arqN = video_audio_arquivo(arqF, ARQ_MAX);
+}
+static const VideoFaixa *arqFaixa(int i) { arqLer(); return i >= 0 && i < arqN ? &arqF[i] : NULL; }
+static int arqTotal(void) { arqLer(); return arqN; }
 #define AU_GRUPOS_MAX 96
 typedef struct { char cod[8]; int nF, nV, ordem, rank; } AuGrupo;
 typedef struct { int tipo, g; } AuLinha;
@@ -770,20 +788,21 @@ static int auCmp(const void *pa, const void *pb) {
   return a->ordem - b->ordem;
 }
 static void auMontar(void) {
-  int nA = video_n_audio(), atual = video_audio_atual(), todas = 0;
+  int nA = arqTotal(), atual = video_audio_arquivo_atual(), todas = 0;
   const char *p1 = ling_audio(), *p2 = ling_audio2();
   uint64_t h = (uint64_t)nA * 1000003u ^ (uint64_t)(atual + 7) * 7919u ^ (uint64_t)extAllN * 104729u ^ (uint64_t)extVersaoLista * 15485863u ^
                (uint64_t)(auTodos + 2) * 31u ^ (uint64_t)(audioext_tocando() + 3) * 131u;
   for (const char *c = p1; *c; c++) h = h * 33u + (unsigned char)*c;
   for (const char *c = p2; *c; c++) h = h * 37u + (unsigned char)*c;
-  for (int i = 0; i < nA; i++) { const VideoFaixa *f = video_audio(i); for (const char *c = f ? f->idioma : ""; *c; c++) h = h * 31u + (unsigned char)*c; }
+  for (int i = 0; i < nA; i++) { const VideoFaixa *f = arqFaixa(i); for (const char *c = f ? f->idioma : ""; *c; c++) h = h * 31u + (unsigned char)*c; }
   if (h == auAssin) return;
   auAssin = h;
   auGN = 0; auLN = 0;
-  // This file's own tracks: the playing one's language first.
-  if (atual >= 0 && atual < nA) { const VideoFaixa *f = video_audio(atual); int g = auAdd(f ? f->idioma : ""); if (g >= 0) auG[g].rank = 0; }
+  // The playing language first: the file's track, or another source's.
+  { const VideoFaixa *f = atual >= 0 ? arqFaixa(atual) : audioext_tocando() ? video_audio(video_audio_atual()) : NULL;
+    if (f) { int g = auAdd(f->idioma); if (g >= 0) auG[g].rank = 0; } }
   for (int i = 0; i < nA; i++) {
-    const VideoFaixa *f = video_audio(i);
+    const VideoFaixa *f = arqFaixa(i);
     int g = auAdd(f ? f->idioma : "");
     if (g >= 0) { auG[g].nF++; if (auG[g].rank > 1) auG[g].rank = 1; }
   }
@@ -798,7 +817,6 @@ static void auMontar(void) {
   if (auTodos) {
     if (audioext_tocando()) { auL[auLN].tipo = FXA_SINC; auL[auLN++].g = -1; }
     for (int g = 0; g < auGN; g++) { auL[auLN].tipo = FXA_IDIOMA; auL[auLN++].g = g; }
-    auL[auLN].tipo = FXA_REND; auL[auLN++].g = -1;
     return;
   }
   // Recommended: this file's languages and the preferred ones; the rest
@@ -809,7 +827,6 @@ static void auMontar(void) {
   }
   if (audioext_tocando()) { auL[auLN].tipo = FXA_SINC; auL[auLN++].g = -1; }
   if (todas) { auL[auLN].tipo = FXA_TODOS; auL[auLN++].g = -1; }
-  auL[auLN].tipo = FXA_REND; auL[auLN++].g = -1;
 }
 // The row of language group `g` (-1 none).
 static int auLinhaDoGrupo(int g) {
@@ -1275,6 +1292,20 @@ static void aplicarFaixa(int i) {
                             video_audio_numero_memoria(f)); }
   video_escolher_audio(i);
 }
+// One of this file's own tracks from a language page (owner 18/11): what the
+// title remembers, then the pick (while another source's audio plays, that
+// session closes and the file's audio comes back where the picture is).
+static void aplicarFaixaArquivo(int i) {
+  const VideoFaixa *f = arqFaixa(i);
+  if (!f) return;
+  if (i == video_audio_arquivo_atual()) return;
+  legsync_audio_trocou();
+  if (!player_id_canal()[0])
+    audioesc_lembrar_faixa(f->idioma, f->codec, f->rotulo, f->canais, video_audio_numero_memoria(f));
+  if (audioext_tocando() || audioext_carregando()) player_toast(i18n("Back to this file's own audio…"), 2500);
+  video_escolher_audio_arquivo(i);
+  arqLidoEm = 0;
+}
 static void aplicar(void) {
   if (coluna == 0 && tipoLinha(foco[0], NULL) != FXA_FAIXA) return;   // the language rows open their page (faixas_evento)
   if (coluna == 0) {
@@ -1534,21 +1565,36 @@ static int sincLinhas(int *tipo, int *arg) {
   for (int i = 0; i < nk; i++) { tipo[n] = SED_KAND; arg[n++] = i; }
   if (audioext_dica_ms()) { tipo[n] = SED_DICA; arg[n++] = 0; }
   // No "Match here" (owner 17/11): the sync runs by itself (subtitles, then
-  // audio); this editor is for setting the time by hand.
+  // audio); this editor is for setting the time by hand. "Scan again" (owner
+  // 18/11) runs that whole sync once more from where the picture is.
+  tipo[n] = SED_SCAN; arg[n++] = 0;
   tipo[n] = SED_ZERAR; arg[n++] = 0;
   return n;
 }
 static void sincFmt(int ms, char *v, unsigned tam) {
   audioext_formatar_offset(ms, v, tam, i18n("%c%u.%03u s"), i18n("%c%u min %u.%03u s"));
 }
+// An automatic result while the editor is open (the refine landing after the
+// subtitles): it becomes what Cancel goes back to.
+static void sincSeguirAuto(void) {
+  unsigned g = audioext_auto_geracao();
+  if (g == sincAutoVisto) return;
+  sincAutoVisto = g;
+  if (sincEd && audioext_offset_ms() != sincOrig) {
+    printf("[ext-audio] sync editor: an automatic result landed, Cancel now goes back to %d ms (was %d)\n", audioext_offset_ms(), sincOrig);
+    fflush(stdout);
+    sincOrig = audioext_offset_ms();
+  }
+}
 static void sincAbrir(void) {
-  sincEd = 1; sincFoco = 0; sincRep = 0; sincOrig = audioext_offset_ms();
+  sincEd = 1; sincFoco = 0; sincRep = 0; sincOrig = audioext_offset_ms(); sincAutoVisto = audioext_auto_geracao();
   printf("[ext-audio] sync editor: open at %d ms\n", sincOrig); fflush(stdout);
 }
 static void sincTecla(SDL_Keycode k, int repeat) {
   int tipo[SED_MAXL], arg[SED_MAXL], n = sincLinhas(tipo, arg);
   char v[48];
   if (sincFoco >= n) sincFoco = n - 1;
+  sincSeguirAuto();
   if (k == SDLK_AC_BACK || k == SDLK_ESCAPE || k == SDLK_BACKSPACE) {
     // Cancel: the offset of before comes back.
     if (audioext_offset_ms() != sincOrig) {
@@ -1591,6 +1637,13 @@ static void sincTecla(SDL_Keycode k, int repeat) {
       audioext_offset_definir(0);
       printf("[ext-audio] sync editor: reset\n"); fflush(stdout);
       sincFoco = 0; return;
+    }
+    if (t == SED_SCAN) {
+      printf("[ext-audio] sync editor: scan again from %d ms\n", audioext_offset_ms()); fflush(stdout);
+      if (audioext_dopasuj_ativo()) { player_toast(i18n("The sync is already scanning…"), 2500); return; }
+      audioext_dopasuj_pedir();
+      player_toast(i18n("Scanning the sync again: subtitles, then about 40 s of audio"), 4000);
+      sincEd = 0; aberta = 0; return;
     }
     if (t == SED_AQUI) {
       printf("[ext-audio] sync editor: match here from %d ms\n", audioext_offset_ms()); fflush(stdout);
@@ -1670,11 +1723,6 @@ void faixas_evento(const SDL_Event *e) {
   // Na de audio nao ha para onde ir — antes elas pulavam para a coluna de
   // legenda, que e justamente o que fazia os dois botoes do player parecerem o
   // mesmo botao.
-  if ((k == SDLK_LEFT || k == SDLK_RIGHT) && !modo && coluna == 0 && tipoLinha(foco[0], NULL) == FXA_REND) {
-    int v = rendMostrado >= 0 ? rendMostrado : video_doador_rend_indice();
-    rendMostrado = (v + (k == SDLK_RIGHT ? 1 : 2)) % 3;
-    return;
-  }
   if ((k == SDLK_LEFT || k == SDLK_RIGHT) && !modo && coluna == 0 && tipoLinha(foco[0], NULL) == FXA_SINC) {
     static int rep;
     rep = e->key.repeat ? rep + 1 : 0;   // held: 100 ms, 1 s, then 10 s
@@ -1690,12 +1738,6 @@ void faixas_evento(const SDL_Event *e) {
     // The sync row is live (LEFT/RIGHT); its OK opens the precise editor.
     if (!modo && coluna == 0 && tipoLinha(foco[0], NULL) == FXA_SINC) {
       sincAbrir(); return;
-    }
-    if (!modo && coluna == 0 && tipoLinha(foco[0], NULL) == FXA_REND) {
-      int v = rendMostrado >= 0 ? rendMostrado : video_doador_rend_indice();
-      video_doador_rend_definir(v, REND_VAL[v]);
-      rendMostrado = -1;
-      return;
     }
     // A language: its page (this file's tracks, then other sources') opens
     // in the same island. "All languages": every language.
@@ -2037,14 +2079,7 @@ static void linhaExterna(int i, float x, float y, float w, int sel, float a) {
   const char *icone = NULL, *idioma = NULL;
   float da = a, dir = x + w - 22.0f;
   GfxRect lr = { x, y, w, IL_LN_H };
-  if (tipo == FXA_REND) {
-    int v = rendMostrado >= 0 ? rendMostrado : video_doador_rend_indice();
-    snprintf(nome, sizeof nome, "%s", i18n("Tracks sent to the TV (test)"));
-    snprintf(sub, sizeof sub, "%s", rendMostrado >= 0 && rendMostrado != video_doador_rend_indice()
-             ? i18n("OK applies it") : i18n("For 4K files whose other-source audio never starts"));
-    snprintf(val, sizeof val, "%s", i18n(REND_ROT[v]));
-    icone = "aj_layers";
-  } else if (tipo == FXA_SINC) {
+  if (tipo == FXA_SINC) {
     int o = audioext_offset_ms();
     snprintf(nome, sizeof nome, "%s", i18n("Audio sync"));
     snprintf(sub, sizeof sub, "%s", i18n(o > 0 ? "Audio later" : o < 0 ? "Audio earlier" : "In sync with the file"));
@@ -2115,7 +2150,7 @@ static void linhaExterna(int i, float x, float y, float w, int sel, float a) {
       gfx_icone((GfxRect){ d.x + 7.0f, d.y + 7.0f, 20.0f, 20.0f }, "pl_chevron-right", 1, 1, 1, a);
       dir -= 34.0f + 10.0f;
     }
-    { float slot = (float)txt_largura(TXT_ILHA_FORTE, tipo == FXA_REND ? "Only the chosen one" : "+0000 ms");
+    { float slot = (float)txt_largura(TXT_ILHA_FORTE, "+0000 ms");
       if (slot < (float)lv.w) slot = (float)lv.w;
       txt_desenhar_alpha(lv, dir - slot + (slot - (float)lv.w) * 0.5f, yc - (float)lv.h * 0.5f, a);
       dir -= slot + 10.0f; }
@@ -2448,9 +2483,6 @@ static void corpoLista(GfxRect c, float a) {
     if (!modo && (volFoco || velFoco)) {
       const char *k[2] = { "\xe2\x86\x90 \xe2\x86\x92", "Voltar" }, *rt[2] = { "Ajustar", "Fechar" };
       plrui_dicas(k, rt, 2, x0 + w - 10.0f, yc, 1, a);
-    } else if (!modo && tipoLinha(foco[0], NULL) == FXA_REND) {
-      const char *k[3] = { "\xe2\x86\x90 \xe2\x86\x92", "OK", "Voltar" }, *rt[3] = { "Ajustar", "Apply", "Fechar" };
-      plrui_dicas(k, rt, 3, x0 + w - 10.0f, yc, 1, a);
     } else if (!modo && tipoLinha(foco[0], NULL) == FXA_SINC) {
       const char *k[3] = { "\xe2\x86\x90 \xe2\x86\x92", "OK", "Voltar" }, *rt[3] = { "Ajustar", "Set exactly", "Fechar" };
       plrui_dicas(k, rt, 3, x0 + w - 10.0f, yc, 1, a);
@@ -2762,6 +2794,7 @@ static void corpoSinc(GfxRect c, float a) {
   float ar, ag, ab;
   ajustes_acento(&ar, &ag, &ab);
   audioext_kandydatos(km, kp, 3);
+  sincSeguirAuto();
   if (sincFoco >= n) sincFoco = n - 1;
   { TxtLinha t = txt_linha(TXT_ILHA_PERGUNTA, i18n("Audio sync"), 243, 242, 239, 255);
     txt_desenhar_alpha(t, x0 + 10.0f, y, a);
@@ -2797,6 +2830,10 @@ static void corpoSinc(GfxRect c, float a) {
         snprintf(val, sizeof val, "%s", v);
         icone = "aj_wand"; marca = audioext_dica_ms() == o; break; }
       case SED_AQUI: snprintf(nome, sizeof nome, "%s", i18n("Match here")); icone = "aj_zap"; break;
+      case SED_SCAN:
+        snprintf(nome, sizeof nome, "%s", i18n("Scan again"));
+        snprintf(val, sizeof val, "%s", i18n(audioext_dopasuj_ativo() ? "Scanning…" : "Subtitles + audio"));
+        icone = "aj_rotate-cw"; break;
       default: snprintf(nome, sizeof nome, "%s", i18n("Reset")); icone = "pl_rotate-ccw"; marca = !o; break;
     }
     if (sel) plrui_linha_foco(r, 18.0f, a);

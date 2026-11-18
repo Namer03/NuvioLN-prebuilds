@@ -4178,6 +4178,9 @@ void stream_audioext_entrada(const Stream *s, AudioExtEntrada *e) {
       if (ln > le && !strncasecmp(nome + ln - le, mp4[k], le)) e->soAudio = 1;
     } }
   e->atmos = s->dolbyAtmos || filtroTem(s, FONTEFILTRO_AUDIO, "Atmos");
+  // Subtitles it declares (the add-on's parsed file or its own list): the
+  // sync matches by them first, so such versions go first (audioextlista.c).
+  e->legendas = s->legendaIdiomas[0] != 0;
   // Several audio tags (a Polish DD and an English DTS-HD): the one the TV
   // takes as it is decides; DTS/TrueHD only when nothing else was declared.
   if (filtroTem(s, FONTEFILTRO_AUDIO, "DD+")) e->codec = AEXT_DDP;
