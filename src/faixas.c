@@ -1846,16 +1846,22 @@ void faixas_atualizar(float dt, Uint32 agora) {
   // in Settings > Addons too (streams.c has no link to the settings).
   { static int filtroPosto;
     if (!filtroPosto) { stream_audioext_filtro_addon(audioext_addon_ligado); filtroPosto = 1; } }
+  // Steps named for the stall watchdog (owner 18/11, log 13: 1384 ms "in
+  // faixas_atualizar" when a donor came up, with no hint which part).
+  NV_PASSO("faixas_atualizar: legendasui");
   if (aberta && modo && coluna == 1) legendasui_atualizar(dt);
+  NV_PASSO("faixas_atualizar: exPasso");
   exPasso(agora);
   // Other versions arrive with the add-ons (AIOStreams after 15-20 s): the
   // list follows them while the sheet is open; the focus stays on its row.
   if (aberta && !modo) {
+    NV_PASSO("faixas_atualizar: extMontar");
     extMontar(0);
     if (foco[0] >= nLinhas(0)) foco[0] = nLinhas(0) > 0 ? nLinhas(0) - 1 : 0;
   }
   // #202: the platform refused the speed (LG/.tpk answer after the request):
   // the row is gone and playback is back at 1x; say it once.
+  NV_PASSO("faixas_atualizar: speed");
   if (velPedidaUi != VEL_NORMAL && !video_velocidade_suportada()) {
     velPedidaUi = VEL_NORMAL; velFoco = 0;
     player_toast_ex(i18n("Esta TV não aceitou mudar a velocidade."), 6000, "aj_triangle-alert", 1);
@@ -1877,10 +1883,14 @@ void faixas_atualizar(float dt, Uint32 agora) {
   // Fechando a partir da barra, ela sai como barra: sem isto a folha inteira
   // piscaria no caminho de volta.
   if (aberta || anim < .01f) animTopo = anim_mola(animTopo, faixas_estilo_topo() ? 1.0f : 0.0f, dt, NV_MOLA_TELA);
+  NV_PASSO("faixas_atualizar: legendaPreDownload");
   legendaPreDownload();
+  NV_PASSO("faixas_atualizar: legendaAutomatica");
   legendaAutomatica(agora);
   if (!legAuto) legenda_pre_descartar("automatica encerrada");
+  NV_PASSO("faixas_atualizar: pilAtualizar");
   pilAtualizar(agora);
+  NV_PASSO("faixas_atualizar: mkvass");
   // Recuo vencido: a MESMA faixa de novo. O overlay nao foi desligado — o que
   // ja estava colhido continua na tela, e o fio novo retoma do sidecar parcial.
   if (legOverlay >= 0 && legOverlayRetomar && (Sint32)(agora - legOverlayRetomar) >= 0) {
@@ -1972,6 +1982,7 @@ void faixas_atualizar(float dt, Uint32 agora) {
     }
   }
   // A sonda voltou para uma faixa escolhida antes dela: agora da para decidir.
+  NV_PASSO("faixas_atualizar: sonda");
   if (legOverlayEsperando >= 0) {
     int i = legOverlayEsperando;
     const VideoFaixa *f = video_legenda(i);
